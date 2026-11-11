@@ -1,0 +1,9 @@
+.env*
+.codex/
+.codex-backup/
+.git/
+logs/
+**/node_modules/
+**/.next/
+**/__pycache__/
+**/*.pyc

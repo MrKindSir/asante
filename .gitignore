@@ -1,0 +1,25 @@
+# Local Codex snapshots and secrets
+.codex-backup/
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# Generated runtime records
+logs/**/*.log
+logs/codex/
+logs/tests/
+__pycache__/
+*.pyc
+
+# Local dependencies and build output
+**/node_modules/
+**/.next/
+**/dist/
+**/build/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+.coverage
+*.tsbuildinfo
+.codex/config.toml

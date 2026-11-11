@@ -1,0 +1,97 @@
+name: Asante CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out Asante
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare Asante environment
+        run: |
+          cp .env.example .env
+          sed -i 's/^ASANTE_HTTP_PORT=.*/ASANTE_HTTP_PORT=8080/' .env
+
+      - name: Validate Docker Compose
+        run: python scripts/codex/checks.py preflight
+
+      - name: Run repository contract tests
+        run: python scripts/codex/checks.py contracts
+        env:
+          ASANTE_BASE_URL: http://localhost:8080
+
+      - name: Build Asante API and website images
+        run: docker compose --env-file .env -f infrastructure/docker-compose.yml build api asante dashboard
+
+      - name: Start Asante stack
+        run: docker compose --env-file .env -f infrastructure/docker-compose.yml up -d
+
+      - name: Wait for Asante proxy
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent http://localhost:8080/asante/api/health > /dev/null && curl --fail --silent http://localhost:8080/asante/ > /dev/null && curl --fail --silent http://localhost:8080/asante/review/ > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose --env-file .env -f infrastructure/docker-compose.yml ps
+          docker compose --env-file .env -f infrastructure/docker-compose.yml logs --no-color proxy api asante dashboard
+          exit 1
+
+      - name: Prepare Asante catalogue and demo media
+        run: |
+          docker compose --env-file .env -f infrastructure/docker-compose.yml exec -T api python -m alembic -c app/db/alembic.ini upgrade head
+          docker compose --env-file .env -f infrastructure/docker-compose.yml exec -T api python -m app.db.seed
+          docker compose --env-file .env -f infrastructure/docker-compose.yml exec -T api python -m app.db.seed_media
+
+      - name: Provision development test accounts
+        # Passwords are generated into an ignored local file, never workflow output.
+        run: python scripts/asante/accounts.py
+
+      - name: Run live route and integration tests
+        run: python scripts/codex/checks.py http
+        env:
+          ASANTE_BASE_URL: http://localhost:8080
+          ASANTE_REQUIRE_SERVICES: "1"
+
+      - name: Run Asante website tests
+        run: python scripts/codex/checks.py website --skip-build
+
+      - name: Run Asante dashboard tests
+        run: python scripts/codex/checks.py dashboard --skip-build
+
+      - name: Run Asante API tests
+        run: python scripts/codex/checks.py api --skip-build
+
+      - name: Provision CI-only Codex read-only accounts
+        run: python scripts/codex/checks.py mcp-setup --no-config
+
+      - name: Verify Codex MCP protocol and denied writes
+        run: python scripts/codex/checks.py mcp-verify
+
+      - name: Upload redacted execution reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-asante-execution-reports
+          path: |
+            logs/codex/
+            logs/tests/
+          if-no-files-found: ignore
+
+      - name: Tear down Asante stack
+        if: always()
+        run: docker compose --env-file .env -f infrastructure/docker-compose.yml down -v
