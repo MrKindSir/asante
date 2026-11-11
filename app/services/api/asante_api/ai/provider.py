@@ -62,9 +62,11 @@ def _ask_ollama(instruction: str, payload: dict[str, Any], timeout: float) -> di
 
 def ask_model_detailed(instruction: str, payload: dict[str, Any], timeout: float = 30) -> dict[str, Any]:
     """Return explicit provider failure states while keeping model output bounded to JSON."""
+    if (os.environ.get("ASANTE_AI_BACKEND") or "").strip().lower() == "modal":
+        from .live_modal import ask_model_detailed_via_modal
+
+        return ask_model_detailed_via_modal(instruction, payload, timeout)
     config = provider_config()
-    # A configured Ollama upstream owns model calls. Do not silently send its
-    # content to a cloud provider if the local endpoint or model is unavailable.
     if config["ollama_base_url"]:
         try:
             parsed = _ask_ollama(instruction, payload, timeout)
@@ -132,6 +134,10 @@ def ask_model_media(
     timeout: float = 60,
 ) -> dict[str, Any] | None:
     """Ask the configured local vision model or cloud provider about images."""
+    if (os.environ.get("ASANTE_AI_BACKEND") or "").strip().lower() == "modal":
+        from .live_modal import ask_model_media_via_modal
+
+        return ask_model_media_via_modal(instruction, payload, image_paths, timeout)
     config = provider_config()
     usable_paths = [Path(path) for path in image_paths[:4] if Path(path).is_file()]
     if not usable_paths:

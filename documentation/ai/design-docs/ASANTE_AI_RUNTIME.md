@@ -6,14 +6,68 @@ Owns AS-11/12/13 and worker findings used by AS-14. See [PLANS.md](../exec-plans
 
 Codex is the development assistant for this repository. Asante uses server-side provider adapters at runtime; it does not call the local Codex application or read Codex memory, ExecRules or configuration.
 
-Current integrated baseline (2026-11-09):
+Current integrated baseline (2026-11-11):
 
-- Planner and researcher run from the contributor story chat through the Asante API (`POST /v1/workspace/projects/{id}/workers`), after the saved research questionnaire. The bounded activity view below records their actual handoffs and execution steps.
-- Live providers are Gemini or another OpenAI-compatible endpoint via `ASANTE_AI_*`. When the provider is fake/off or has no API key, the planner uses the deterministic fixture. Empty research fails loud; it does not invent sources.
+- Planner and researcher run from the contributor story chat through the Asante API (`POST /v1/workspace/projects/{id}/workers`), after the saved research questionnaire. The bounded activity view below records their actual handoffs and execution steps. The portal can open a live research-activity modal while a worker runs, including after a browser connection interrupt; completion is announced in chat.
+- **Localhost AI:** leave `ASANTE_AI_BACKEND` empty. Planner/researcher/vision/text prefer host Ollama (`ASANTE_OLLAMA_*`). Transcription uses local `faster-whisper`. Optional cloud `ASANTE_AI_*` (Gemini or OpenAI-compatible) remains a fallback only when local Ollama is not configured for that call.
+- **Live AI:** set `ASANTE_AI_BACKEND=modal`. The API never talks to host Ollama for that deployment. It calls the Modal Asante app through `asante_api.ai.live_modal` using `ASANTE_MODAL_BASE_URL` and `ASANTE_MODAL_SHARED_SECRET`. Modal runs Ollama (chat/vision) and Whisper (transcription) for Asante. Do not point live at localhost Ollama and do not share HubTweak Modal apps or secrets with Asante.
+- When the configured provider is fake/off or unavailable, the planner uses the deterministic fixture. Empty research fails loud; it does not invent sources. Missing speech/provider results stay `unavailable`; workers never fabricate transcripts or captions.
 - Research collectors cover web search, news RSS, pasted HTTPS URLs and social/video discovery (including the bundled YouTube seed catalogue under `asante_api/ai/data/`).
 - A deterministic verifier produces `asante.verification.v1` findings for shared portal/dashboard checks. Workers cannot approve or publish.
-- Provider keys stay server-side. Model IDs, purpose-specific limits and spend ceilings belong in Asante server configuration, not UI constants.
-- The contributor chat, existing field-report/export/share flow, and bounded research-activity view are authorized additions. Autonomous multi-agent teams and a public `/asante/talk/` Ollama gateway remain out of scope. The separately authorized AS-13 video slice uses the submission job worker and reviewer dashboard; it does not change the Research-room planner/researcher path.
+- Provider keys and Modal secrets stay server-side / Modal secrets. Model IDs, caption caps and spend ceilings belong in Asante server configuration, not UI constants.
+- Compose runs `api` and a separate `job-worker` process from the same API image for durable media/assessment jobs. Autonomous multi-agent teams and a public `/asante/talk/` Ollama gateway remain out of scope.
+
+## Live Modal backend (operator contract)
+
+Use this section when implementing or debugging live AI, transcription, translation or media jobs.
+
+### Split of responsibility
+
+| Environment | Text / vision | Transcription | Caption caps |
+|---|---|---|---|
+| Localhost (`ASANTE_AI_BACKEND` empty) | Host Ollama via `ASANTE_OLLAMA_BASE_URL` | Local `faster-whisper` | `ASANTE_CAPTION_SECONDS` default 180; `ASANTE_TRANSLATE_MAX_CUES` default 100 |
+| Live (`ASANTE_AI_BACKEND=modal`) | Modal Ollama via `live_modal.py` | Modal Whisper via `live_modal.transcribe_wav_via_modal` | `ASANTE_LIVE_CAPTION_SECONDS` default 45; `ASANTE_LIVE_TRANSLATE_MAX_CUES` default 12; batch/deadline via `ASANTE_LIVE_TRANSLATE_*` |
+
+Caps are implemented once in `asante_api/ai/caption_limits.py`. Every media job stores a `captionLimits` snapshot on input/result. Raise spend only by changing live env values and recreating `api` / `job-worker`; do not hard-code larger windows in UI or workers.
+
+### Modal app
+
+- Source: `app/services/ai/modal/asante_ollama_app.py`
+- Deploy helper: `scripts/asante/deploy_modal_ollama.sh`
+- Deploy: create Modal secret `asante-modal-auth` with `ASANTE_MODAL_SHARED_SECRET`, then `python -m modal deploy app/services/ai/modal/asante_ollama_app.py`
+- Set live Compose/env `ASANTE_MODAL_BASE_URL` to the printed ASGI URL and the same shared secret
+- Auth: bearer shared secret on every Modal route; unauthorized calls fail closed
+- Cold start can take minutes; live Modal HTTP timeouts must stay long enough for GPU warm-up. Do not “fix” cold starts by falling through to Gemini or host Ollama on live
+- Live Whisper uses `ASANTE_MODAL_WHISPER_MODEL` (a Modal/Hugging Face model name such as `tiny`), separate from localhost `ASANTE_WHISPER_MODEL` paths. Transcription requests use `ASANTE_MODAL_TRANSCRIBE_TIMEOUT` (default 240 seconds) and retain safe configuration, authentication, timeout, provider and no-speech reasons in the draft result.
+
+### Durable media jobs
+
+Compose service `job-worker` claims PostgreSQL `processing_jobs` with leases (`FOR UPDATE SKIP LOCKED`).
+
+Job types:
+
+| Type | When enqueued | Notes |
+|---|---|---|
+| `transcribe` | Verified draft media upload, and again on submit if missing | First `caption_seconds()` of speech only; clips cues to `translate_max_cues()` |
+| `translate` | Same as transcribe | Waits until sibling `transcribe` is not queued/running; preserves cue times; bounded batch/deadline |
+| `analyze` | Video only | Bounded keyframes; scene observations are not heritage proof |
+| `assessment` | Submit only | Requires a frozen submission packet; never runs on draft-only jobs |
+
+Draft vs submission:
+
+- Verified media upload (`PUT /v1/uploads/{id}/content` for `purpose=media`) calls `enqueue_project_media_jobs`. Those jobs have `submission_id = NULL` and appear on the draft chat as `mediaJobs` / `transcriptDraft` / `translations`.
+- Submit promotes matching draft jobs for the same `upload_id` onto the submission (avoids repeating Modal spend), then ensures assessment + any missing media jobs exist.
+- Replacing draft media cancels superseded queued/running draft jobs and enqueues a fresh capped set.
+- Backfill existing drafts that already have verified media and no jobs: `scripts/asante/backfill_draft_media_jobs.py` inside the API container.
+
+### Rules for future job / Modal prompts
+
+1. Keep localhost and live backends separate. Never make live depend on host Ollama or change localhost to require Modal.
+2. Keep HubTweak MinIO, Modal apps and secrets out of Asante changes.
+3. Prefer extending `caption_limits.py`, `live_modal.py` and `jobs.py` over adding a second vector DB, Redis or microservices.
+4. Empty/unavailable speech or provider failure must remain explicit; do not invent transcript text, captions or sources.
+5. Do not auto-publish drafts. Human review gates remain for publication, consent and authorship.
+6. After live code changes that touch AI/jobs, rebuild/recreate `api` and `job-worker`, confirm `caption_limits_snapshot()` on both, and check new job payloads include the live caps.
 
 ### Recorded research activity (2026-11-10 authorized extension)
 
@@ -55,7 +109,7 @@ Freeze these nested contracts with the AS-11.a Pydantic/TypeScript schemas: find
 
 Target: one Asante worker process sharing the API code/image, with PostgreSQL jobs/leases and `FOR UPDATE SKIP LOCKED` acquisition. Persist a job and its triggering domain event in the same transaction. Do not rely on in-process background tasks for work that must survive restart.
 
-Current Research-room planner/researcher runs execute inside the API request path and record `worker_runs`. Compose starts a `job-worker` process from the API image for durable submission jobs: bounded submission assessment, audio/video transcription and video analysis. Results remain separate from the frozen packet. Broad lease/retry/cancel harness remains AS-11.b work.
+Current Research-room planner/researcher runs execute inside the API request path and record `worker_runs`. Compose starts a `job-worker` process from the API image for durable media and assessment jobs: draft upload transcription/translation(/analyze), submission assessment, and any missing media jobs at submit time. Results remain separate from the frozen packet and are also projected onto draft workspace projects for the contributor chat. Workers append a bounded `workerTrail` of timestamped lifecycle, progress, output, and retry events to the job result for authenticated reviewer visibility. Trail entries contain safe process summaries, not hidden model reasoning, raw prompts, contributor research or raw submitted documents. Broad lease/retry/cancel harness remains AS-11.b work.
 
 - States: queued/running/succeeded/failed/cancelled; record attempt history and lease expiry.
 - Deduplicate by actor/project/revision, input hash, worker type and relevant schema/prompt version. Explicit “run again” records intent; accidental repeated clicks must not duplicate charges.
@@ -105,25 +159,25 @@ Tests: conflicting/absent sources, unsafe redirected URL, prompt injection in so
 
 ## AS-13 — language and video
 
-Video upload, transcription and analysis are implemented as an AS-13 submission-job slice. Translation remains a specified target and is not claimed as live.
+Audio/video transcription, timed translation and video analysis run as durable `processing_jobs`. They start when draft media is verified, not only after submit. Public catalogue captions still require human-approved publication values; worker drafts are never auto-published.
 
 ### AS-13.a: transcription
 
-After AS-09/10 verification, read a scoped original/normalized audio asset. Preserve original media and detected/declared language separately. Store timed segments, speaker labels only when supported, uncertain names/terms and provider metadata. Permit a contributor-corrected transcript as a new version with links to the original draft.
+After AS-09/10 verification, read a scoped original/normalized audio asset. Preserve original media and detected/declared language separately. Store timed segments, uncertain names/terms and provider metadata. Permit a contributor-corrected transcript as a new version with links to the original draft.
 
-The current video path uses local `faster-whisper` on an extracted mono 16 kHz WAV and stores language, backend, text and timed segments as a private packet draft. Missing Whisper or speech yields an explicit unavailable draft; contributor narrative and original media remain unchanged. General long-form chunk reconciliation remains unfinished.
+Current path extracts mono 16 kHz speech, clips to `caption_seconds()`, then runs Whisper (local on localhost; Modal on live). Results store language, backend, text, timed segments and `coveredSeconds` as a private draft on the job (and on the draft project projection). Missing Whisper or speech yields an explicit unavailable draft; contributor narrative and original media remain unchanged. General long-form chunk reconciliation remains unfinished.
 
 ### AS-13.b: translation
 
-Translate an exact source transcript revision into an approved language. Cache by source hash, target language and provider/prompt version. Return text/timed-caption draft plus ambiguous idioms and untranslated names. Changes to the source invalidate derivative readiness.
+Translate timed transcript cues into approved languages (`en` / `zu` / `st`, excluding the source). Preserve cue start/end times. Cap cues with `translate_max_cues()`, batch with `translate_batch_size()`, and stop at `translate_deadline_seconds()`. Live uses Modal chat; localhost prefers host Ollama. Partial/unavailable results stay explicit. Changes to the source invalidate derivative readiness.
 
-The listener sees original versus translation and reviewed/draft/unavailable state. Do not expose an unreviewed private derivative simply because a listener requested it. Never replace the original recording or credit.
+The listener sees original versus translation and reviewed/draft/unavailable state only after human publication. Do not expose an unreviewed private derivative simply because a listener requested it. Never replace the original recording or credit.
 
 ### AS-13.c: video analysis
 
-Extract a mono 16 kHz speech WAV and a bounded set of timestamped keyframes with AS-10. The current implementation caps visual analysis at four frames and stores their timestamps with a reviewer-facing draft. ASR uses local faster-whisper; Ollama is preferred for configured visual/text analysis, with cloud fallback only when local Ollama is not configured. Missing providers or empty results remain explicitly unavailable rather than fixture-success claims.
+Extract a mono 16 kHz speech WAV and a bounded set of timestamped keyframes with AS-10. The current implementation caps visual analysis at four frames and stores their timestamps with a reviewer-facing draft. ASR follows the transcription backend above; vision prefers Modal Ollama on live and host Ollama on localhost. Missing providers or empty results remain explicitly unavailable rather than fixture-success claims.
 
-Visual observations are model interpretations, not historical verification or identity attribution. The current worker samples at most four frames, prefers configured Ollama for vision/text and uses a configured cloud provider only when Ollama is absent. Missing providers or empty output remain unavailable. Media/worker failures surface separately from missing evidence.
+Visual observations are model interpretations, not historical verification or identity attribution. Media/worker failures surface separately from missing evidence.
 
 ## Evaluations and live-integration gate
 
@@ -146,7 +200,7 @@ Default CI uses fakes and fixtures without external AI spend. Live evaluation is
 
 | Worker mode | Input and permission boundary | Output and explicit failure | Human escalation |
 |---|---|---|---|
-| Deterministic provenance | Frozen packet only: revision, consent, attribution, media/checksum refs, submitted source metadata, relevant worker run IDs. No web/network/model authority. | `asante.assessment.v1` readiness checks, input hash and timestamp. Missing references are incomplete/blocked; checksums are integrity references, never authenticity proof. | Reviewer resolves technical/consent blockers or escalates missing provenance. |
-| Claim/evidence comparison | Bounded frozen narrative, edited report and at most 50 submitted source records/excerpts. Provider receives untrusted story/source data; cannot write projects, decisions, publication or media. No extra web collection. | Claim types and `supported`, `contradicted`, `insufficient_evidence`, `not_assessed`; only submitted source IDs and exact excerpts. Timeout, provider unavailable and malformed output remain distinct states. | Pending, missing, invalid or unavailable result blocks approval; reviewer escalates. Evidence concerns and uncertainty require human judgment. |
+| Deterministic provenance | Frozen packet allowlist: revision, consent, attribution, media/checksum refs, English transcript availability and supporting PDF extraction state. Never contributor research, research briefs, plans, reports, source URLs or worker traces. | `asante.assessment.v2` readiness checks and an input hash over only the allowed reviewer evidence. Checksums are integrity references, never authenticity proof. | Reviewer resolves technical/consent blockers or escalates missing provenance. |
+| Submission evidence comparison | Bounded story title, description, claim, submitted location, original contributor narrative, completed English transcript (or explicitly labeled English translation draft), optional extracted text from the first ten PDF pages, and bounded video scene observations. No contributor research or web/network collection. Provider receives untrusted content and cannot write projects, decisions, publication or media. | Claim states `supported`, `contradicted`, `insufficient_evidence`, or `not_assessed`; exact quotes must match supplied transcript/PDF/scene evidence IDs. “Supported” means consistent with this submission only, not independently verified. Timeout, provider unavailable, missing text and malformed output remain distinct. | Assessment waits until transcription, translation and scene-analysis jobs are terminal. Reviewers handle uncertainty; no worker decides authenticity or approval. |
 
-One unique PostgreSQL assessment job is enqueued in the submission transaction. A lease must be present and unexpired before progress/result writes. Derived results stay in job records, preserving packet bytes and contributor authorship. Keyword heritage checks are advisory attention only. This slice has deterministic fake/unit coverage only; it does not establish provider accuracy, authenticity assessment, plagiarism detection, deepfake detection or cultural acceptance.
+One unique PostgreSQL assessment job is enqueued in the submission transaction. A lease must be present and unexpired before progress/result writes. A schema/prompt-version migration requeues assessment jobs for undecided packets so their results are rebuilt from the allowlisted input. Derived results stay in job records, preserving packet bytes and contributor authorship. Keyword heritage checks are advisory attention only. This slice does not establish provider accuracy, authenticity assessment, plagiarism detection, deepfake detection or cultural acceptance.

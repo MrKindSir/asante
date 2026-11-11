@@ -65,7 +65,7 @@ Always qualify the owner in project discussions: use **Codex** or **Asante** in 
 - **User website and portal:** Next.js with TypeScript, running on Node.js.
 - **System approval dashboard:** Next.js with TypeScript, running on Node.js.
 - **Backend API and AI pipeline:** Python with FastAPI.
-- **AI workers:** Python services for planning, transcription, translation, evidence review, provenance, and publishing preparation.
+- **AI workers:** Python services for planning, transcription, translation, evidence review, provenance, and publishing preparation. Localhost uses host Ollama + local Whisper; live uses `ASANTE_AI_BACKEND=modal` (Modal Ollama/Whisper) with caption caps in `asante_api/ai/caption_limits.py`. See `documentation/ai/design-docs/ASANTE_AI_RUNTIME.md`.
 - **Database:** PostgreSQL with PostGIS for story, contributor, review, source, version, and location data.
 - **Semantic search:** PostgreSQL `pgvector` when retrieval needs it.
 - **Map:** MapLibre GL JS with a suitable OpenStreetMap-compatible tile provider.

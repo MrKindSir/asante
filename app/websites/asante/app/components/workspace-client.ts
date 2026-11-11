@@ -14,7 +14,24 @@ export type WorkerRun = {
 export type SaveProjectOptions = { background?: boolean };
 export type ResearchBrief = { knownMaterial: string; questions: string; context: string; priorities: string; uncertainties: string };
 export type ResearchFlow = { status: "incomplete" | "saved" | "running" | "planned" | "completed" | "failed"; workerType?: "planner" | "researcher"; inputHash: string; runId?: string; safeError?: string };
-export type Project = { id: string; title: string; place: string; language: string; format: string; audience: string; transcript: string; claim: string; source: string; consent: boolean; researchBrief?: ResearchBrief | null; researchFlow?: ResearchFlow; plan?: Plan; planDocument?: FieldReportDocument | null; research?: ResearchPacket; suggestion: "pending" | "accepted" | "rejected"; submissionId?: string; uploadId?: string; version: number; media?: Media | null; status?: string };
+export type MediaJob = {
+  jobId: string; projectId?: string; jobType: "transcribe" | "translate" | "analyze" | string;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | string;
+  progress: number; safeError?: string; createdAt?: string | null; finishedAt?: string | null;
+};
+export type TranscriptDraft = {
+  status?: string; text?: string; language?: string; backend?: string; note?: string;
+  coveredSeconds?: number; segments?: { start: number; end: number; text: string }[];
+};
+export type TranslationDraft = { status?: string; text?: string; backend?: string; note?: string; providerModel?: string };
+export type Project = {
+  id: string; title: string; place: string; language: string; format: string; audience: string; transcript: string; claim: string; source: string; consent: boolean;
+  researchBrief?: ResearchBrief | null; researchFlow?: ResearchFlow; plan?: Plan; planDocument?: FieldReportDocument | null; research?: ResearchPacket;
+  suggestion: "pending" | "accepted" | "rejected"; submissionId?: string; uploadId?: string; supportingDocumentUploadId?: string; version: number;
+  media?: Media | null; supportingDocument?: Media | null; status?: string;
+  mediaJobs?: MediaJob[]; transcriptDraft?: TranscriptDraft | null; translations?: Record<string, TranslationDraft> | null;
+  videoAnalysis?: { status?: string; observations?: { timestamp?: number; observation: string }[]; note?: string; backend?: string } | null;
+};
 export type Account = { id: string; email: string; role: "contributor" | "reviewer"; profileId: string };
 export type Workspace = { account?: Account | null; profile: Profile | null; projects: Project[]; preferences: Record<string, string>; publishedStories?: Story[] };
 

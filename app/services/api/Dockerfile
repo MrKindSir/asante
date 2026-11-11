@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /workspace
 ENV HF_HOME=/var/cache/huggingface
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg poppler-utils && rm -rf /var/lib/apt/lists/*
 ENV ASANTE_WHISPER_MODEL=/workspace/models/whisper-tiny
 
 COPY app/services/api/requirements.txt /workspace/requirements.txt

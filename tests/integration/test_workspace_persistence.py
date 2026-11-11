@@ -20,7 +20,7 @@ from asante_api.main import app
 from asante_api.storage import storage_client
 from asante_api.database import dispose_database_engine, session_factory
 from asante_api.models import ProcessingJobRecord
-from asante_api.ai.jobs import process_job
+from asante_api.ai.jobs import claim_next_job, process_job
 from app.db.seed_accounts import seed_accounts, TEST_ACCOUNTS
 
 
@@ -308,6 +308,10 @@ class WorkspacePersistenceTests(unittest.TestCase):
             client.cookies.clear()
             self.assertEqual(client.post(prefix + "/auth/login", headers=headers, json={"email": "reviewer@asante.test", "password": self.passwords["reviewer"]}).status_code, 200)
             self.assertEqual(client.get(prefix + "/review/queue").status_code, 200)
+            ensured = client.post(prefix + "/review/queue/ensure-jobs", headers=headers)
+            self.assertEqual(ensured.status_code, 200, ensured.text)
+            self.assertIn("pendingPackets", ensured.json())
+            self.assertIn("queuedJobs", ensured.json())
             self.assertEqual(client.post(prefix + "/workspace/projects", headers=headers, json={"id": str(uuid4()), "title": "Reviewer cannot contribute"}).status_code, 403)
             active_token = client.cookies.get("asante_account")
             with psycopg.connect(**self.db_args, dbname=self.database) as connection:
@@ -447,8 +451,8 @@ class WorkspacePersistenceTests(unittest.TestCase):
             submission = packet.json()
             self.assertEqual(submission["revision_id"], preview.json()["revision_id"])
             self.assertEqual(submission["revision_version"], saved["version"])
-            self.assertEqual(submission["project_revision"]["title"], saved["title"])
-            self.assertEqual(submission["project_revision"]["transcript"], saved["transcript"])
+            self.assertNotIn("project_revision", submission)
+            self.assertNotIn("research", submission)
             repeated = post("/submissions", {"project_id": project["id"], "expected_version": saved["version"], "consent_given": True, "preview_hash": preview.json()["preview_hash"]})
             self.assertEqual(repeated.json()["submission_id"], submission["submission_id"])
             self.assertEqual(post("/workspace/projects", saved).status_code, 409)
@@ -520,6 +524,17 @@ class WorkspacePersistenceTests(unittest.TestCase):
             self.assertIn("poster", derivatives)
             self.assertLessEqual(len(derivatives["keyframes"]), 4)
             self.assertNotIn("objectKey", json.dumps(derivatives))
+            from reportlab.pdfgen.canvas import Canvas
+            supporting_pdf = BytesIO()
+            pdf = Canvas(supporting_pdf)
+            pdf.drawString(72, 720, "Fixture archive: the bridge opened in 1960.")
+            pdf.save()
+            pdf_bytes = supporting_pdf.getvalue()
+            pdf_intent = client.post(prefix + "/uploads", headers=headers, json={
+                "project_id": project_id, "name": "supporting-evidence.pdf", "size": len(pdf_bytes),
+                "content_type": "application/pdf", "purpose": "supporting_document", "consent_given": True,
+            }).json()
+            self.assertEqual(client.put(pdf_intent["uploadUrl"], headers=headers, content=pdf_bytes).status_code, 200)
             saved = next(item for item in client.get(prefix + "/workspace").json()["projects"] if item["id"] == project_id)
             preview = client.get(prefix + "/submissions/preview/" + project_id, params={"expected_version": saved["version"]})
             self.assertEqual(preview.status_code, 200, preview.text)
@@ -528,10 +543,20 @@ class WorkspacePersistenceTests(unittest.TestCase):
             })
             self.assertEqual(submission.status_code, 201, submission.text)
             packet = submission.json()
-            self.assertEqual({job["jobType"] for job in packet["jobs"]}, {"assessment", "transcribe", "analyze"})
+            self.assertEqual({job["jobType"] for job in packet["jobs"]}, {"assessment", "transcribe", "translate", "analyze"})
             self.assertEqual({job["status"] for job in packet["jobs"]}, {"queued"})
             self.assertTrue(packet["original_media"]["checksum"])
             self.assertEqual(len(packet["media_derivatives"]), len(derivatives["keyframes"]) + 2)
+
+            async def claim_first_job():
+                async with session_factory()() as session:
+                    selected_job = await claim_next_job(session, "dependency-test-worker")
+                    self.assertEqual(selected_job.job_type, "transcribe")
+                    selected_job.status = "queued"
+                    selected_job.lease_owner = ""
+                    selected_job.lease_expires_at = None
+                    await session.commit()
+            asyncio.run(claim_first_job())
 
             with patch("asante_api.ai.jobs._optional_whisper_transcribe", return_value={
                 "text": "Synthetic fixture transcript.", "language": "en",
@@ -545,8 +570,8 @@ class WorkspacePersistenceTests(unittest.TestCase):
                         queued = (await session.scalars(
                             select(ProcessingJobRecord)
                             .where(ProcessingJobRecord.submission_id == packet["submission_id"])
-                            .order_by(ProcessingJobRecord.priority)
                         )).all()
+                        queued.sort(key=lambda job: {"transcribe": 10, "translate": 20, "analyze": 30, "assessment": 40}[job.job_type])
                         for job in queued:
                             job.status = "running"
                             job.attempt = 1
@@ -568,10 +593,18 @@ class WorkspacePersistenceTests(unittest.TestCase):
             reviewed = next(item for item in queue.json()["items"] if item["submission_id"] == packet["submission_id"])
             self.assertEqual({job["status"] for job in reviewed["jobs"]}, {"succeeded"})
             self.assertEqual(reviewed["preview_hash"], packet["preview_hash"])
-            self.assertEqual(reviewed["project_revision"], packet["project_revision"])
-            self.assertIn(reviewed["assessment"]["status"], {"partial", "unavailable"})
-            self.assertNotEqual(reviewed["assessment"]["claimEvidence"]["status"], "complete")
-            self.assertFalse(reviewed["review_policy"]["may_approve"])
+            self.assertNotIn("project_revision", reviewed)
+            self.assertNotIn("research", reviewed)
+            self.assertIn(reviewed["assessment"]["status"], {"complete", "partial", "unavailable"})
+            self.assertIn(reviewed["assessment"]["claimEvidence"]["status"], {"complete", "incomplete", "timeout", "malformed", "provider_unavailable"})
+            self.assertEqual(reviewed["assessment"]["schemaVersion"], "asante.assessment.v2")
+            self.assertEqual(reviewed["assessment"]["promptVersion"], "submission-evidence.v2")
+            self.assertTrue(any(item["evidenceId"] == "video_transcript_en" for item in reviewed["assessment"]["claimEvidence"]["evidence"]))
+            self.assertTrue(any(item["evidenceId"] == "supporting_pdf" for item in reviewed["assessment"]["claimEvidence"]["evidence"]))
+            self.assertIn("supporting_pdf", json.dumps(reviewed["assessment"]["claimEvidence"]))
+            self.assertNotIn("research", json.dumps(reviewed["assessment"]))
+            self.assertNotIn("source_url", json.dumps(reviewed))
+            self.assertTrue(reviewed["review_policy"]["may_approve"])
             self.assertEqual(reviewed["transcriptDraft"]["status"], "draft")
             self.assertIn("Synthetic fixture transcript", reviewed["transcriptDraft"]["text"])
             self.assertEqual(reviewed["videoAnalysis"]["status"], "draft")

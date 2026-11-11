@@ -208,6 +208,23 @@ class VideoJobTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "lease expired"):
             asyncio.run(check())
 
+    def test_worker_progress_checkpoints_are_saved_for_reviewer_trail(self):
+        job = SimpleNamespace(
+            status="running", lease_owner="worker-a", lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+            progress=5, job_type="transcribe", result_payload={},
+        )
+
+        async def check():
+            await processing_jobs._set_progress(AsyncMock(), job, 35)
+
+        asyncio.run(check())
+        events = job.result_payload["workerTrail"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["label"], "Preparing speech audio")
+        self.assertEqual(events[0]["state"], "running")
+        self.assertIn("Extracting", events[0]["detail"])
+        self.assertTrue(events[0]["at"])
+
     def test_audio_and_video_submit_enqueue_timed_translation(self):
         class Rows:
             def __init__(self, rows):
@@ -219,16 +236,16 @@ class VideoJobTests(unittest.TestCase):
         class FakeSession:
             def __init__(self):
                 self.added = []
-                self.called = False
+                self.calls = 0
 
             async def scalars(self, _query):
-                if not self.called:
-                    self.called = True
+                self.calls += 1
+                if self.calls <= 2:
                     return Rows([])
                 return Rows([SimpleNamespace(id="derivative-audio", kind="audio_track", object_key="private/audio.wav", meta={"duration": 2.0})])
 
             async def get(self, _model, _identity):
-                return SimpleNamespace(object_key="private/original.mp4", content_type="video/mp4")
+                return SimpleNamespace(id="upload-test", object_key="private/original.mp4", content_type="video/mp4", name="clip.mp4")
 
             def add(self, job):
                 self.added.append(job)
@@ -246,9 +263,91 @@ class VideoJobTests(unittest.TestCase):
         self.assertTrue(all(job.status == "queued" for job in created))
         self.assertEqual(created[0].input_payload["object_key"], "private/original.mp4")
         self.assertEqual(created[0].input_payload["media_derivatives"]["audio_track"]["objectKey"], "private/audio.wav")
+        self.assertIn("captionLimits", created[0].input_payload)
         packet.packet["media_format"] = "audio"
         audio_created = asyncio.run(processing_jobs.enqueue_submission_jobs(FakeSession(), packet))
         self.assertEqual({job.job_type for job in audio_created}, {"assessment", "transcribe", "translate"})
+
+    def test_verified_draft_media_enqueues_capped_jobs_without_assessment(self):
+        class Rows:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def all(self):
+                return self.rows
+
+        class FakeSession:
+            def __init__(self):
+                self.added = []
+                self.calls = 0
+
+            async def scalars(self, _query):
+                self.calls += 1
+                if self.calls == 1:
+                    return Rows([SimpleNamespace(id="derivative-audio", kind="audio_track", object_key="private/audio.wav", meta={"duration": 2.0})])
+                return Rows([])
+
+            def add(self, job):
+                self.added.append(job)
+
+            async def flush(self):
+                return None
+
+        project = SimpleNamespace(id="project-draft", contributor_id="contributor-draft", content={"title": "Draft audio", "language": "en", "format": "audio"})
+        upload = SimpleNamespace(id="upload-draft", purpose="media", status="verified", content_type="audio/mpeg", name="demo.mp3", object_key="private/demo.mp3")
+        with patch.dict("os.environ", {"ASANTE_AI_BACKEND": "modal", "ASANTE_LIVE_CAPTION_SECONDS": "45", "ASANTE_LIVE_TRANSLATE_MAX_CUES": "12"}, clear=False):
+            created = asyncio.run(processing_jobs.enqueue_project_media_jobs(FakeSession(), project=project, upload=upload))
+        self.assertEqual({job.job_type for job in created}, {"transcribe", "translate"})
+        self.assertTrue(all(job.submission_id is None for job in created))
+        self.assertEqual(created[0].input_payload["captionLimits"]["captionSeconds"], 45)
+        self.assertEqual(created[0].input_payload["captionLimits"]["translateMaxCues"], 12)
+
+    def test_submission_jobs_requeue_cancelled_work_and_refresh_inputs(self):
+        cancelled = SimpleNamespace(
+            id="job-cancelled", job_type="assessment", status="cancelled", progress=72, attempt=2,
+            input_payload={"old": True}, result_payload={"old": True}, safe_error="stopped",
+            lease_owner="worker-old", lease_expires_at=object(), started_at=object(), finished_at=object(),
+        )
+
+        class Rows:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def all(self):
+                return self.rows
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = 0
+
+            async def scalars(self, _query):
+                self.calls += 1
+                return Rows([cancelled] if self.calls == 1 else [])
+
+            async def get(self, _model, _identity):
+                return SimpleNamespace(id="upload-old", object_key="private/video.mp4", content_type="video/mp4", name="clip.mp4")
+
+            def add(self, _job):
+                return None
+
+            async def flush(self):
+                return None
+
+        packet = SimpleNamespace(
+            id="submission-old", project_id="project-old", contributor_id="contributor-old", upload_id="upload-old",
+            packet={"media_format": "video", "title": "A story", "summary": "Updated summary"},
+        )
+        jobs = asyncio.run(processing_jobs.enqueue_submission_jobs(FakeSession(), packet))
+        self.assertEqual(cancelled.status, "queued")
+        self.assertEqual((cancelled.progress, cancelled.attempt), (0, 0))
+        self.assertEqual(cancelled.result_payload, {})
+        self.assertEqual(cancelled.input_payload["summary"], "Updated summary")
+        self.assertEqual(cancelled.safe_error, "")
+        self.assertEqual(cancelled.lease_owner, "")
+        self.assertIsNone(cancelled.lease_expires_at)
+        self.assertIsNone(cancelled.started_at)
+        self.assertIsNone(cancelled.finished_at)
+        self.assertEqual({job.job_type for job in jobs}, {"assessment", "transcribe", "translate", "analyze"})
 
     def test_translation_keeps_transcript_timestamps(self):
         segments = [{"start": 0.0, "end": 2.0, "text": "Hello"}, {"start": 2.0, "end": 4.0, "text": "Friends"}]
@@ -291,6 +390,7 @@ class VideoJobTests(unittest.TestCase):
 
     def test_configured_ollama_failure_does_not_fall_through_to_cloud(self):
         with patch.dict("os.environ", {
+            "ASANTE_AI_BACKEND": "",
             "ASANTE_OLLAMA_BASE_URL": "http://ollama:11434",
             "ASANTE_OLLAMA_MODEL": "llama3.2:latest",
             "ASANTE_AI_PROVIDER": "gemini",
@@ -301,11 +401,237 @@ class VideoJobTests(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
         self.assertIn("ollama:11434/api/chat", post.call_args.args[0])
 
+    def test_live_modal_backend_uses_separate_adapter(self):
+        from asante_api.ai.provider import ask_model_detailed
+
+        with patch.dict("os.environ", {"ASANTE_AI_BACKEND": "modal"}, clear=False), patch(
+            "asante_api.ai.live_modal.ask_model_detailed_via_modal",
+            return_value={"status": "complete", "output": {"ok": True}, "provider": "modal-ollama", "model": "llama3.2:3b", "error": ""},
+        ) as modal_ask, patch("asante_api.ai.provider.httpx.post") as post:
+            result = ask_model_detailed("Return JSON", {"question": "test"})
+        self.assertEqual(result["provider"], "modal-ollama")
+        self.assertEqual(result["output"], {"ok": True})
+        modal_ask.assert_called_once()
+        post.assert_not_called()
+
+    def test_translation_uses_modal_backend_and_keeps_transcript_timestamps(self):
+        """Translation reads timed transcript cues, then asks the live Modal adapter (not localhost Ollama)."""
+        segments = [{"start": 1.5, "end": 3.0, "text": "Hello"}, {"start": 3.0, "end": 5.5, "text": "Friends"}]
+        modal_response = {
+            "status": "complete",
+            "provider": "modal-ollama",
+            "model": "llama3.2:3b",
+            "error": "",
+            "output": {"segments": [{"id": 0, "text": "Sawubona"}, {"id": 1, "text": "Bangani"}]},
+        }
+        with patch.dict("os.environ", {"ASANTE_AI_BACKEND": "modal"}, clear=False), patch(
+            "asante_api.ai.live_modal.ask_model_detailed_via_modal",
+            return_value=modal_response,
+        ) as modal_ask, patch("asante_api.ai.provider.httpx.post") as local_post:
+            cues, result = processing_jobs.translate_caption_segments(segments, "en", "zu")
+        self.assertEqual([(cue["start"], cue["end"], cue["text"]) for cue in cues], [(1.5, 3.0, "Sawubona"), (3.0, 5.5, "Bangani")])
+        self.assertEqual(result["provider"], "modal-ollama")
+        modal_ask.assert_called()
+        local_post.assert_not_called()
+
+    def test_live_modal_chat_adapter_parses_translation_json(self):
+        from asante_api.ai.live_modal import ask_model_detailed_via_modal
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "provider": "modal-ollama",
+                    "model": "llama3.2:3b",
+                    "content": '{"segments":[{"id":0,"text":"Sawubona"}]}',
+                }
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ASANTE_AI_BACKEND": "modal",
+                "ASANTE_MODAL_BASE_URL": "https://example.modal.run",
+                "ASANTE_MODAL_SHARED_SECRET": "test-secret-at-least-16",
+                "ASANTE_OLLAMA_MODEL": "llama3.2:3b",
+            },
+            clear=False,
+        ), patch("asante_api.ai.live_modal.httpx.post", return_value=FakeResponse()) as post:
+            result = ask_model_detailed_via_modal(
+                "Translate",
+                {"source_language": "en", "target_language": "zu", "segments": [{"id": 0, "text": "Hello"}]},
+                timeout=5,
+            )
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["provider"], "modal-ollama")
+        self.assertEqual(result["output"]["segments"][0]["text"], "Sawubona")
+        self.assertIn("/v1/asante/chat", post.call_args.args[0])
+        self.assertTrue(post.call_args.kwargs.get("follow_redirects"))
+
+    def test_transcription_uses_modal_whisper_when_backend_is_modal(self):
+        with tempfile.TemporaryDirectory(prefix="asante-modal-whisper-test-") as directory:
+            wav = Path(directory) / "speech.wav"
+            wav.write_bytes(b"RIFF....WAVEfmt ")
+            modal_draft = {
+                "text": "Hello friends",
+                "language": "en",
+                "segments": [{"start": 0.0, "end": 2.0, "text": "Hello friends"}],
+                "model": "tiny",
+                "backend": "modal-faster-whisper",
+            }
+            with patch.dict("os.environ", {"ASANTE_AI_BACKEND": "modal"}, clear=False), patch(
+                "asante_api.ai.live_modal.transcribe_wav_via_modal",
+                return_value=modal_draft,
+            ) as modal_whisper:
+                result = processing_jobs._optional_whisper_transcribe(wav)
+        self.assertEqual(result["backend"], "modal-faster-whisper")
+        self.assertEqual(result["segments"][0]["text"], "Hello friends")
+        modal_whisper.assert_called_once()
+
+    def test_live_modal_transcribe_follows_modal_303_redirects(self):
+        from asante_api.ai.live_modal import transcribe_wav_via_modal
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "text": "Hello friends",
+                    "language": "en",
+                    "segments": [{"start": 0.0, "end": 1.5, "text": "Hello friends"}],
+                    "model": "tiny",
+                    "backend": "modal-faster-whisper",
+                }
+
+        with tempfile.TemporaryDirectory(prefix="asante-modal-redirect-") as directory:
+            wav = Path(directory) / "speech.wav"
+            wav.write_bytes(b"RIFF....WAVEfmt ")
+            with patch.dict(
+                "os.environ",
+                {
+                    "ASANTE_AI_BACKEND": "modal",
+                    "ASANTE_MODAL_BASE_URL": "https://example.modal.run",
+                    "ASANTE_MODAL_SHARED_SECRET": "test-secret-at-least-16",
+                    "ASANTE_MODAL_WHISPER_MODEL": "tiny",
+                },
+                clear=False,
+            ), patch("asante_api.ai.live_modal.httpx.post", return_value=FakeResponse()) as post:
+                result = transcribe_wav_via_modal(wav)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["text"], "Hello friends")
+        self.assertTrue(post.call_args.kwargs.get("follow_redirects"))
+        self.assertIn("/v1/asante/transcribe", post.call_args.args[0])
+
+    def test_live_caption_limits_default_smaller_than_localhost(self):
+        from asante_api.ai.caption_limits import caption_limits_snapshot, caption_seconds, translate_max_cues
+
+        with patch.dict("os.environ", {"ASANTE_AI_BACKEND": "", "ASANTE_LIVE_CAPTION_SECONDS": "", "ASANTE_CAPTION_SECONDS": "", "ASANTE_LIVE_TRANSLATE_MAX_CUES": "", "ASANTE_TRANSLATE_MAX_CUES": ""}, clear=False):
+            self.assertEqual(caption_seconds(), 180)
+            self.assertEqual(translate_max_cues(), 100)
+        with patch.dict("os.environ", {"ASANTE_AI_BACKEND": "modal", "ASANTE_LIVE_CAPTION_SECONDS": "", "ASANTE_CAPTION_SECONDS": "", "ASANTE_LIVE_TRANSLATE_MAX_CUES": "", "ASANTE_TRANSLATE_MAX_CUES": ""}, clear=False):
+            snapshot = caption_limits_snapshot()
+        self.assertTrue(snapshot["liveModal"])
+        self.assertEqual(snapshot["captionSeconds"], 45)
+        self.assertEqual(snapshot["translateMaxCues"], 12)
+
+    def test_live_like_transcribe_then_translate_respects_cost_caps(self):
+        """Simulate live Modal flow: ASR cues → translation, without calling Modal or using long media."""
+        long_transcript = [
+            {"start": float(index), "end": float(index) + 0.8, "text": f"Cue {index}"}
+            for index in range(0, 120, 5)
+        ]
+        # Includes speech past the live 45s window and more cues than the live max.
+        self.assertGreater(len(long_transcript), 12)
+        self.assertGreater(long_transcript[-1]["start"], 45)
+
+        def fake_modal_translate(instruction, payload, timeout=30):
+            segments = payload.get("segments") or []
+            if "segments" in (payload or {}) and isinstance(segments, list) and segments and "id" in segments[0]:
+                return {
+                    "status": "complete",
+                    "provider": "modal-ollama",
+                    "model": "llama3.2:3b",
+                    "error": "",
+                    "output": {"segments": [{"id": item["id"], "text": f"ZU:{item['text']}"} for item in segments]},
+                }
+            return {
+                "status": "complete",
+                "provider": "modal-ollama",
+                "model": "llama3.2:3b",
+                "error": "",
+                "output": {"text": f"ZU:{payload.get('text')}"},
+            }
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ASANTE_AI_BACKEND": "modal",
+                "ASANTE_LIVE_CAPTION_SECONDS": "45",
+                "ASANTE_LIVE_TRANSLATE_MAX_CUES": "12",
+                "ASANTE_LIVE_TRANSLATE_BATCH_SIZE": "3",
+            },
+            clear=False,
+        ), patch("asante_api.ai.live_modal.ask_model_detailed_via_modal", side_effect=fake_modal_translate) as modal_ask:
+            cues, result = processing_jobs.translate_caption_segments(long_transcript, "en", "zu")
+        self.assertEqual(result["provider"], "modal-ollama")
+        self.assertLessEqual(len(cues), 12)
+        self.assertTrue(all(cue["end"] <= 45 for cue in cues))
+        self.assertTrue(all(cue["text"].startswith("ZU:") for cue in cues))
+        self.assertGreaterEqual(modal_ask.call_count, 1)
+        self.assertLessEqual(modal_ask.call_count, 12)  # capped cues, batched
+
+    def test_live_transcribe_job_passes_capped_excerpt_length_to_ffmpeg(self):
+        async def no_download(_key, destination):
+            destination.write_bytes(b"fake-media")
+            return destination
+
+        recorded: list[list[str]] = []
+
+        def fake_run_command(command, timeout):
+            recorded.append(list(command))
+            Path(command[-1]).write_bytes(b"RIFF")
+            return ""
+
+        session = AsyncMock()
+        job = SimpleNamespace(
+            input_payload={"object_key": "private/original.mp4", "media_derivatives": {}},
+            progress=0,
+            status="running",
+            lease_owner="test-worker",
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            result_payload={},
+        )
+        packet = SimpleNamespace(packet={"summary": "story"})
+        modal_draft = {
+            "status": "draft",
+            "text": "Short live draft",
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 2.0, "text": "Short live draft"}],
+            "backend": "modal-faster-whisper",
+            "coveredSeconds": 45,
+        }
+        def fake_extract(_source, destination):
+            Path(destination).write_bytes(b"RIFF")
+
+        with patch.dict("os.environ", {"ASANTE_AI_BACKEND": "modal", "ASANTE_LIVE_CAPTION_SECONDS": "45"}, clear=False), patch.object(
+            processing_jobs, "_download_upload", side_effect=no_download
+        ), patch.object(processing_jobs, "extract_audio_track", side_effect=fake_extract), patch.object(
+            processing_jobs, "run_command", side_effect=fake_run_command
+        ), patch.object(processing_jobs, "_optional_whisper_transcribe", return_value=modal_draft):
+            result = asyncio.run(processing_jobs._run_transcribe(session, job, packet))
+        self.assertEqual(result["transcriptDraft"]["status"], "draft")
+        self.assertEqual(result["transcriptDraft"]["coveredSeconds"], 45)
+        ffmpeg = next(cmd for cmd in recorded if cmd and cmd[0] == "ffmpeg")
+        self.assertIn("-t", ffmpeg)
+        self.assertEqual(ffmpeg[ffmpeg.index("-t") + 1], "45")
+
     def test_media_helper_is_unavailable_when_no_provider_is_configured(self):
         with tempfile.TemporaryDirectory(prefix="asante-provider-test-") as directory:
             image = Path(directory) / "frame.jpg"
             image.write_bytes(b"small image test input")
-            with patch.dict("os.environ", {"ASANTE_OLLAMA_BASE_URL": "", "ASANTE_AI_PROVIDER": "fake", "ASANTE_AI_API_KEY": ""}, clear=False):
+            with patch.dict("os.environ", {"ASANTE_AI_BACKEND": "", "ASANTE_OLLAMA_BASE_URL": "", "ASANTE_AI_PROVIDER": "fake", "ASANTE_AI_API_KEY": ""}, clear=False):
                 result = ask_model_media("Analyze frames", {"frameCount": 1}, [image])
         self.assertIsNone(result)
 

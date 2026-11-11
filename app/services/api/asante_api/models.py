@@ -118,6 +118,7 @@ class UploadRecord(Base):
     content_type: Mapped[str] = mapped_column(String(100), nullable=False)
     size: Mapped[int] = mapped_column(Integer, nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    purpose: Mapped[str] = mapped_column(String(30), nullable=False, default="media")
     consent_scope: Mapped[str] = mapped_column(String(80), nullable=False, default="")
     consent_recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
@@ -241,7 +242,7 @@ class MediaDerivativeRecord(Base):
 class ProcessingJobRecord(Base):
     __tablename__ = "processing_jobs"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    submission_id: Mapped[str] = mapped_column(ForeignKey("asante.submissions.id"), nullable=False, index=True)
+    submission_id: Mapped[str | None] = mapped_column(ForeignKey("asante.submissions.id"), nullable=True, index=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("asante.projects.id"), nullable=False)
     contributor_id: Mapped[str] = mapped_column(ForeignKey("asante.contributors.id"), nullable=False)
     job_type: Mapped[str] = mapped_column(String(40), nullable=False)

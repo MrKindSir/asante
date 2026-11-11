@@ -85,11 +85,22 @@ export function mediaError(file: Pick<File, "size" | "type">): string | null {
   if (file.size > limit) return file.type.startsWith("video/") ? "Choose a video no larger than 500 MB for this prototype." : "Choose audio smaller than 100 MB for this prototype.";
   return null;
 }
+export function supportingDocumentError(file: Pick<File, "size" | "type">): string | null {
+  if (file.type !== "application/pdf") return "Choose a PDF supporting document.";
+  if (file.size <= 0) return "The PDF is empty.";
+  if (file.size > 25 * 1024 * 1024) return "Choose a PDF no larger than 25 MB.";
+  return null;
+}
 export class AsanteApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 export async function api<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch("/asante/api" + path, body === undefined ? { cache: "no-store" } : { method: "POST", headers: { "Content-Type": "application/json", "X-Asante-Request": "1" }, body: JSON.stringify(body) });
+  const response = await fetch(
+    "/asante/api" + path,
+    body === undefined
+      ? { cache: "no-store", credentials: "include" }
+      : { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", "X-Asante-Request": "1" }, body: JSON.stringify(body) },
+  );
   if (!response.ok) {
     let detail: unknown;
     try { detail = (await response.json() as { detail?: unknown }).detail; } catch { /* Use the safe fallback below. */ }

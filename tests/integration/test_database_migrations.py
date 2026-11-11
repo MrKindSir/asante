@@ -127,7 +127,7 @@ class DatabaseMigrationIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     )
                 self.assertEqual(schema, "asante")
                 self.assertTrue(postgis_version)
-                self.assertEqual(revision, "0013_submission_assessment")
+                self.assertEqual(revision, "0016_requeue_review_evidence_v2")
                 self.assertEqual(landmark_count, 4)
                 self.assertEqual(published_story_count, 4)
                 self.assertEqual(draft_story_count, 1)

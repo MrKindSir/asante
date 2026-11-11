@@ -10,6 +10,7 @@ describe("Asante human review", () => {
     const html = renderToStaticMarkup(createElement(DashboardPage));
     expect(html).toContain('type="email"');
     expect(html).toContain('type="password"');
+    expect(html).toContain('<a class="brand" href="/asante/">');
     expect(html).toContain("review dashboard or contributor portal");
     expect(html).not.toContain("Asante reviewer access key");
     expect(html).not.toContain("Stories waiting to be heard.");

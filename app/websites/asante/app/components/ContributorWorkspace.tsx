@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { api, AsanteApiError, mediaError } from "./story-domain";
+import { api, AsanteApiError, mediaError, supportingDocumentError } from "./story-domain";
 
 import { captureAsanteStorage, openWorkspace, savePreference, uploadFile, Profile, Project, Media, Workspace, migrateBrowserStorage, Account, SaveProjectOptions } from "./workspace-client";
 
@@ -31,10 +31,12 @@ export default function ContributorWorkspace() {
   const accountEpoch = useRef(0);
   const saves = useRef(new Map<string, Promise<Project>>());
   const researchLock = useRef(false);
+  const researchFlowSeen = useRef<{ projectId: string | null; status?: string }>({ projectId: null });
   const activeWorker = project?.researchFlow?.status === "running" ? project.researchFlow.workerType || null : null;
   const [media, setMedia] = useState<Media | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [activityOpenRequest, setActivityOpenRequest] = useState(0);
   const [storageConsent, setStorageConsent] = useState(false);
   const [liveLocation, setLiveLocation] = useState(false);
   const [ready, setReady] = useState(false);
@@ -276,7 +278,9 @@ export default function ContributorWorkspace() {
           planDocument: result.planDocument, researchFlow: result.researchFlow, version: result.projectVersion };
         applySavedProject(saved, epoch);
       }
-      if (stillHere() && saved.researchFlow?.status === "completed") setMessage("Research results are available. Candidate evidence requires human interpretation.");
+      if (stillHere() && saved.researchFlow?.status === "completed") {
+        setMessage("Research finished. Review the plan and candidate sources below — they still need your interpretation.");
+      }
     } catch (cause) {
       let latestFlow: Project["researchFlow"];
       if (epoch === accountEpoch.current) {
@@ -289,13 +293,37 @@ export default function ContributorWorkspace() {
         } catch { /* Keep the saved brief and expose the request failure. */ }
         if (stillHere()) {
           if (latestFlow?.status !== "running" && latestFlow?.status !== "completed") setProject((current) => current?.id === selected ? { ...current, researchFlow: { status: "failed", inputHash: current.researchFlow?.inputHash || "", safeError: (cause as Error).message } } : current);
-          setMessage(latestFlow?.status === "running" ? "Connection interrupted. The saved worker is still running; its status will refresh." : (cause as Error).message);
+          if (latestFlow?.status === "running") {
+            setMessage("Connection interrupted. The worker kept running on the server. Watch live research activity for progress — this chat will update when it finishes.");
+            setActivityOpenRequest((value) => value + 1);
+          } else if (latestFlow?.status === "completed") {
+            setMessage("Research finished. Review the plan and candidate sources below — they still need your interpretation.");
+          } else {
+            setMessage((cause as Error).message);
+          }
         }
       }
     } finally {
       if (epoch === accountEpoch.current) { researchLock.current = false; setBusy(false); }
     }
   }
+  useEffect(() => {
+    const projectId = project?.id || null;
+    const status = project?.researchFlow?.status;
+    if (researchFlowSeen.current.projectId !== projectId) {
+      researchFlowSeen.current = { projectId, status };
+      return;
+    }
+    const previous = researchFlowSeen.current.status;
+    researchFlowSeen.current = { projectId, status };
+    if (previous !== "running") return;
+    if (status === "completed") {
+      setMessage("Research finished. Review the plan and candidate sources below — they still need your interpretation.");
+    } else if (status === "failed") {
+      setMessage(project?.researchFlow?.safeError || "Research failed. Your saved brief is preserved.");
+    }
+  }, [project?.id, project?.researchFlow?.status, project?.researchFlow?.safeError]);
+  const mediaJobsBusy = Boolean(project?.mediaJobs?.some((job) => job.status === "queued" || job.status === "running"));
   useEffect(() => {
     if (project?.researchFlow?.status !== "running" || researchLock.current) return;
     const epoch = accountEpoch.current;
@@ -310,34 +338,55 @@ export default function ContributorWorkspace() {
     }, 2000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [project?.id, project?.researchFlow?.status, busy]);
-  async function prepareFile(file: File, consent: boolean): Promise<boolean> {
+  useEffect(() => {
+    if (!mediaJobsBusy || !project) return;
+    const epoch = accountEpoch.current;
+    const id = project.id;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void api<Workspace>("/v1/workspace").then((workspace) => {
+        if (cancelled || epoch !== accountEpoch.current || selection.current !== id) return;
+        const latest = workspace.projects.find((item) => item.id === id);
+        if (!latest) return;
+        applySavedProject(latest, epoch);
+        const pending = latest.mediaJobs?.some((job) => job.status === "queued" || job.status === "running");
+        if (!pending && latest.transcriptDraft?.status === "draft") {
+          setMessage("Transcription and translation drafts are ready for this recording. They still need human review.");
+        }
+      }).catch(() => { /* Polling never starts media jobs. */ });
+    }, 2500);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [project?.id, mediaJobsBusy]);
+  async function prepareFile(file: File, consent: boolean, purpose: "media" | "supporting_document" = "media"): Promise<boolean> {
     if (!project || !consent) return false;
-    const error = mediaError(file);
+    const error = purpose === "supporting_document" ? supportingDocumentError(file) : mediaError(file);
     if (error) { setMessage(error); return false; }
     setBusy(true); setMessage(""); setProgress(0);
     const controller = new AbortController(); uploadController.current = controller;
     try {
       const saved = dirty ? await saveProject(project) : project;
       setBusy(true);
-      const intent = await api<{ uploadUrl: string }>("/v1/uploads", { project_id: saved.id, name: file.name, size: file.size, content_type: file.type, consent_given: true });
+      const intent = await api<{ uploadUrl: string }>("/v1/uploads", { project_id: saved.id, name: file.name, size: file.size, content_type: file.type, purpose, consent_given: true });
       await uploadFile(intent.uploadUrl, file, setProgress, controller.signal);
       const workspace = await api<Workspace>("/v1/workspace");
       applyWorkspace(workspace);
       const updated = workspace.projects.find((item) => item.id === saved.id);
       if (updated) { setProject(updated); setMedia(updated.media || null); setDirty(false); }
-      setMessage("Original media stored in Asante and verified by the server.");
+      setMessage(updated?.mediaJobs?.length
+        ? "Original media stored in Asante. Transcription and translation jobs are queued within the live caption caps."
+        : "Original media stored in Asante and verified by the server.");
       return true;
     } catch (cause) { setMessage((cause as Error).message); return false; }
     finally { setBusy(false); setProgress(null); uploadController.current = null; }
   }
-  async function submit(previewHash?: string): Promise<boolean> {
-    if (!project || !profile || !project.consent || !(media || project.media)) return false;
+  async function submit(previewHash?: string, consentGiven = project?.consent ?? false): Promise<boolean> {
+    if (!project || !profile || !consentGiven || !(media || project.media)) return false;
     setBusy(true); setMessage("");
     try {
       const saved = dirty ? await saveProject(project) : project;
       setBusy(true);
       const preview = previewHash ? { preview_hash: previewHash } : await api<{ preview_hash: string }>(`/v1/submissions/preview/${encodeURIComponent(saved.id)}?expected_version=${saved.version}`);
-      await api("/v1/submissions", { project_id: saved.id, expected_version: saved.version, consent_given: true, preview_hash: preview.preview_hash });
+      await api("/v1/submissions", { project_id: saved.id, expected_version: saved.version, consent_given: consentGiven, preview_hash: preview.preview_hash });
       const workspace = await api<Workspace>("/v1/workspace"); applyWorkspace(workspace);
       const updated = workspace.projects.find((item) => item.id === saved.id);
       if (updated) { setProject(updated); setMedia(updated.media || null); }
@@ -378,6 +427,7 @@ export default function ContributorWorkspace() {
     message={message}
     onDismissMessage={() => setMessage("")}
     activeWorker={activeWorker}
+    activityOpenRequest={activityOpenRequest}
     uploadProgress={progress}
     isUploading={progress !== null}
     isDirty={dirty}

@@ -153,6 +153,8 @@ The contributor chat includes a compact activity bubble showing the recorded pla
 
 Story details, research questionnaire (including incomplete answers), and story notes autosave after a short typing pause. Profile autosave requires explicit storage consent. Keep inputs usable during background saves, preserve newer edits and failed saves, serialize writes using returned versions, show visible save state and retry, and flush pending form edits before closing or explicitly starting research. New project autosave retains the form and stable ID. Submitted projects remain read-only. Credentials, uploads, submission, and publication require explicit actions.
 
+In the contributor chat composer, the notes field starts at the same 44 px height as Upload recording (40 px on mobile), can resize vertically to 240 px (180 px on mobile), and keeps longer text scrollable beyond that height.
+
 ### Field-report plan document
 
 The project plan is presented as a structured field report, not a chat transcript. **View plan** opens a PDF-like report with the current project title/place, summary, editable sections, attributed research references and any charts, tables or related images present in the stored plan/research output. **Edit plan** opens the same document model with section-level fields and debounced autosave; preserve current values and surface save/conflict failures. Download offers PDF, plain text and JSON for the current saved document. A share popup creates a read-only `/asante/plans/{token}/` link and manages existing-account collaborators with viewer/editor roles. Anonymous users and viewers cannot edit; editor access requires the matching signed-in account. Submitted projects remain frozen, and sharing does not accept a plan or publish a story. Do not invent sources or claim that unavailable related images exist.
@@ -169,7 +171,7 @@ Support progress and cancellation; expired URL retry creates or renews the corre
 
 ### AS-10 frontend integration
 
-Render processing status, poster, derivative availability and transcript/caption readiness. Block publication-related readiness while processing/verification failed. Retain original filename/credit without exposing private bucket keys.
+Render processing status, poster, derivative availability and transcript/caption readiness. After a verified draft upload, the workspace projects `mediaJobs`, `transcriptDraft` and `translations` from durable jobs (capped live Modal path; see ASANTE_AI_RUNTIME). Show queued/running/succeeded/unavailable honestly; never invent caption text in the UI. Block publication-related readiness while processing/verification failed. Retain original filename/credit without exposing private bucket keys.
 
 Tests: real upload from browser origin, cancellation, expiry, format spoof, progress, server rejection, reload recovery, asset/project mismatch and cleanup of object URLs.
 
@@ -184,9 +186,11 @@ Tests: real upload from browser origin, cancellation, expiry, format spoof, prog
 
 ### AS-15.a: queue and packet detail
 
-**Implemented 2026-11-10:** authenticated reviewer detail shows the exact frozen field-report sections, contributor narrative and claim, submitted source excerpts with retrieval states, original media, transcript/video-analysis drafts, deterministic provenance checks, evidence-assessment state and cited claim excerpts/rationales. All media and assessment job states are refreshed for audio and video. Findings and approval availability use the API-owned versioned review policy; model interpretations are labelled as decision support and never authenticity verdicts.
+**Implemented 2026-11-11:** authenticated reviewer detail shows submitted story title/description/claim/location, original media, English transcript or labeled translation draft, video scene observations, and an optional contributor-attached PDF. The assessment worker compares those allowed inputs and exact transcript/PDF/scene excerpts only; contributor research, briefs, source URLs, plans/reports and worker traces stay private and are absent from reviewer packets/model input. Assessment/provider/prompt/hash and media-job states are wired to durable jobs; empty results show queued/running/unavailable state instead of placeholder metadata. Findings and approval availability use the API-owned versioned review policy. Model interpretations are decision support, not independent fact-checking or an authenticity verdict.
 
-**Remaining:** richer queue filters/pagination, visible linked worker-run detail per packet, actual interactive keyframe review, and focused 360px/desktop browser evidence.
+The review queue has a custom status dialog, a collapsible submission rail, and submission selection restored from the URL. The first sidebar item is Dashboard with workload and publication summaries; decision history includes the published video catalogue. Review packet sections are collapsible. Worker-run trace detail is intentionally omitted from the reviewer dashboard.
+
+**Remaining:** queue pagination, actual interactive keyframe review, and focused 360px/desktop browser evidence.
 
 Separate deterministic blockers from attention findings and worker recommendations. Show guideline version and exact packet/revision. Evidence links are untrusted content; never render retrieved HTML as trusted application markup.
 
@@ -221,3 +225,5 @@ The contributor portal offers email/password sign-in, explicit contributor regis
 The portal sidebar links to the signed-in public contributor profile, and Overview separates owned published stories from private project drafts. Story details link to `/asante/profiles/{profileId}/`; the profile page lists only public stories with explicit-play players. Private emails/bios/drafts are never displayed on that page. The four existing fixture catalogue stories are explicitly linked to their test contributor accounts; their media-availability labels remain accurate.
 
 The dashboard has account email/password sign-in and sign-out. The authenticated role routes contributors to the portal and reviewers to the review dashboard; opening the wrong workspace redirects based on the server role. Server role checks protect queue, decision and media requests. Old shared reviewer-key instructions are superseded. Account sessions are shared across same-origin tabs: use separate normal/incognito windows for simultaneous contributor/reviewer testing, or sign out before switching accounts. Focus refresh clears inappropriate cached data when another tab changes the account. Role changes do not move story ownership. Broader visual acceptance remains the user's review. The dashboard provides a labelled switch between the clean Localhost path and the configured direct port.
+
+Evidence comparison and each media-worker draft section provide a Worker trail popup with the worker's safe input summary, provider/status, timestamped recorded checkpoints and saved output. The trail reports observable actions and outcomes rather than private model reasoning; contributor research, raw PDF text and prompts remain hidden. Older jobs without checkpoint history show only their persisted lifecycle timestamps and are labeled accordingly.

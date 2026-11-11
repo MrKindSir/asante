@@ -35,9 +35,25 @@ def token_hash(value: str) -> str:
 
 
 def mutation(request: Request) -> None:
-    origin = request.headers.get("origin")
-    expected = f"{request.headers.get('x-forwarded-proto', request.url.scheme)}://{request.headers.get('host')}"
-    if request.headers.get("x-asante-request") != "1" or (origin and origin.rstrip("/") != expected):
+    """Allow same-site browser mutations; tolerate TLS termination at the edge."""
+    if request.headers.get("x-asante-request") != "1":
+        raise HTTPException(403, "Use the Asante application to make this request")
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    if not origin:
+        return
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip().lower()
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
+    if not host:
+        raise HTTPException(403, "Use the Asante application to make this request")
+    if ":" in host:
+        name, _, port = host.rpartition(":")
+        if (proto == "https" and port == "443") or (proto == "http" and port == "80"):
+            host = name
+    expected = {f"{proto}://{host}"}
+    # Edge HTTPS often terminates before the Asante proxy, which still sees http.
+    if proto == "http":
+        expected.add(f"https://{host}")
+    if origin not in expected:
         raise HTTPException(403, "Use the Asante application to make this request")
 
 

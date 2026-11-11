@@ -19,7 +19,7 @@ from starlette.background import BackgroundTask
 from starlette.responses import StreamingResponse
 
 from .database import get_session
-from .models import ContributorRecord, WorkspaceSession, ProjectRecord, ProjectRevision, UploadRecord, SubmissionPacket, DecisionRecord, AccountRecord, MediaDerivativeRecord, WorkerRunRecord
+from .models import ContributorRecord, WorkspaceSession, ProjectRecord, ProjectRevision, UploadRecord, SubmissionPacket, DecisionRecord, AccountRecord, MediaDerivativeRecord
 from .storage import media_response, storage_client, media_bucket
 from .auth import mutation, optional_account, public_account, require_contributor, require_reviewer
 from .catalogue import list_published_stories, public_caption_tracks
@@ -79,6 +79,7 @@ class ProjectInput(BaseModel):
     researchBrief: ResearchBrief | None = None
     suggestion: Literal["pending", "accepted", "rejected"] = "pending"
     uploadId: str | None = Field(default=None, max_length=64)
+    supportingDocumentUploadId: str | None = Field(default=None, max_length=64)
     version: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
@@ -147,12 +148,38 @@ async def download_project_pack(project_id: str, body: DownloadInput, contributo
 
 
 async def project_output(session: AsyncSession, project: ProjectRecord) -> dict:
+    from .ai.jobs import list_jobs_for_project, public_job
+
     packet = await session.scalar(select(SubmissionPacket).where(SubmissionPacket.project_id == project.id))
     upload = await session.get(UploadRecord, project.content.get("uploadId")) if project.content.get("uploadId") else None
+    document_upload = await session.get(UploadRecord, project.content.get("supportingDocumentUploadId")) if project.content.get("supportingDocumentUploadId") else None
     media = None
-    if upload and upload.status == "verified":
+    if upload and upload.status == "verified" and upload.purpose == "media":
         media = {"id": upload.id, "name": upload.name, "size": upload.size, "type": upload.content_type, "checksum": upload.checksum, "url": f"/asante/api/v1/uploads/{upload.id}/media"}
-    return {**project.content, "id": project.id, "version": project.version, "submissionId": packet.id if packet else None, "status": packet.status if packet else "draft", "media": media}
+    supporting_document = None
+    if document_upload and document_upload.status == "verified" and document_upload.purpose == "supporting_document":
+        supporting_document = {"id": document_upload.id, "name": document_upload.name, "size": document_upload.size, "type": document_upload.content_type, "checksum": document_upload.checksum, "url": f"/asante/api/v1/uploads/{document_upload.id}/media"}
+    jobs = await list_jobs_for_project(session, project.id)
+    media_job_types = {"transcribe", "translate", "analyze"}
+    submission_media = [job for job in jobs if job.submission_id and job.job_type in media_job_types]
+    draft_media = [job for job in jobs if job.submission_id is None and job.job_type in media_job_types]
+    media_jobs = submission_media or draft_media
+    transcript_job = next((job for job in media_jobs if job.job_type == "transcribe"), None)
+    translate_job = next((job for job in media_jobs if job.job_type == "translate"), None)
+    analysis_job = next((job for job in media_jobs if job.job_type == "analyze"), None)
+    return {
+        **project.content,
+        "id": project.id,
+        "version": project.version,
+        "submissionId": packet.id if packet else None,
+        "status": packet.status if packet else "draft",
+        "media": media,
+        "supportingDocument": supporting_document,
+        "mediaJobs": [public_job(job) for job in media_jobs],
+        "transcriptDraft": (transcript_job.result_payload or {}).get("transcriptDraft") if transcript_job else None,
+        "translations": (translate_job.result_payload or {}).get("translations") if translate_job else None,
+        "videoAnalysis": (analysis_job.result_payload or {}).get("videoAnalysis") if analysis_job else None,
+    }
 
 
 async def workspace_output(session: AsyncSession, contributor: ContributorRecord) -> dict:
@@ -232,8 +259,12 @@ async def save_project(body: ProjectInput, contributor: ContributorRecord = Depe
         raise HTTPException(409, "Submitted revisions are preserved. Duplicate this project to edit.")
     if body.uploadId:
         upload = await session.get(UploadRecord, body.uploadId)
-        if not upload or upload.contributor_id != contributor.id or upload.project_id != body.id or upload.status != "verified":
+        if not upload or upload.purpose != "media" or upload.contributor_id != contributor.id or upload.project_id != body.id or upload.status != "verified":
             raise HTTPException(422, "Choose verified media for this project")
+    if body.supportingDocumentUploadId:
+        document = await session.get(UploadRecord, body.supportingDocumentUploadId)
+        if not document or document.purpose != "supporting_document" or document.content_type != "application/pdf" or document.contributor_id != contributor.id or document.project_id != body.id or document.status != "verified":
+            raise HTTPException(422, "Choose a verified PDF supporting document for this project")
     content = body.model_dump(exclude={"version", "id"})
     previous = project.content if project else {}
     if previous.get("generatedReportHash"):
@@ -334,6 +365,34 @@ class SubmissionInput(BaseModel):
 
 ASSESSMENT_VERSION = "asante.review-policy.v1"
 
+_PRIVATE_REVIEW_KEYS = {"research", "researchBrief", "researchFlow", "source_url", "plan", "plan_document", "planDocument", "project_revision", "worker_run_ids", "worker_runs"}
+_PRIVATE_REVIEW_FINDINGS = {"planner", "research", "worker_trace", "source_metadata", "worker_trace_linkage"}
+
+
+def reviewer_packet(packet: dict) -> dict:
+    """Return only contributor-submitted story evidence safe for reviewer display."""
+    return {key: value for key, value in packet.items() if key not in _PRIVATE_REVIEW_KEYS}
+
+
+def reviewer_assessment(result: dict) -> dict:
+    """Strip private research source rows and citations from assessment output."""
+    safe = {key: value for key, value in result.items() if key not in {"sources"}}
+    claim_evidence = safe.get("claimEvidence")
+    if isinstance(claim_evidence, dict):
+        claim_evidence = {key: value for key, value in claim_evidence.items() if key != "sources"}
+        claims = claim_evidence.get("claims")
+        if isinstance(claims, list):
+            claim_evidence["claims"] = [
+                {key: value for key, value in claim.items() if key not in {"sourceIds", "excerpts"}}
+                for claim in claims if isinstance(claim, dict)
+            ]
+        safe["claimEvidence"] = claim_evidence
+    provenance = safe.get("provenance")
+    if isinstance(provenance, dict) and isinstance(provenance.get("checks"), list):
+        provenance["checks"] = [check for check in provenance["checks"] if isinstance(check, dict) and check.get("check") not in {"source_metadata", "worker_trace_linkage"}]
+        safe["provenance"] = provenance
+    return safe
+
 
 def review_policy(packet: dict, jobs: list | None = None) -> dict:
     from .ai.workers import run_verifier
@@ -348,6 +407,8 @@ def review_policy(packet: dict, jobs: list | None = None) -> dict:
     for finding in verifier.get("findings", []):
         if finding.get("kind") in {"consent", "media"}:
             continue
+        if finding.get("kind") in _PRIVATE_REVIEW_FINDINGS:
+            continue
         findings.append({"check": finding.get("kind", "verifier"), "status": finding.get("status", "attention"), "detail": finding.get("message", "")})
     if not packet.get("consent_given") or not packet.get("consent_scope"):
         findings.append({"check": "Consent scope", "status": "blocked", "detail": "Recorded consent for storage and review is required."})
@@ -355,14 +416,14 @@ def review_policy(packet: dict, jobs: list | None = None) -> dict:
         findings.append({"check": "Original media", "status": "blocked", "detail": "A server-verified original with checksum is required."})
     for check in provenance.get("checks", []):
         status = {"pass": "pass", "attention": "attention", "incomplete": "attention", "blocked": "blocked"}.get(check.get("status"), "attention")
-        if check.get("check") not in {"consent", "media_integrity_reference"}:
+        if check.get("check") not in {"consent", "media_integrity_reference"} and check.get("check") not in _PRIVATE_REVIEW_FINDINGS:
             findings.append({"check": check.get("check", "Provenance"), "status": status, "detail": check.get("detail", "")})
     if not assessment or assessment.status in {"queued", "running"}:
         findings.append({"check": "Submission assessment", "status": "blocked", "detail": "Required evidence assessment is pending."})
     elif assessment.status != "succeeded" or result.get("status") not in {"complete", "partial"}:
-        findings.append({"check": "Submission assessment", "status": "blocked", "detail": "Assessment is unavailable or invalid; escalate for human review before approval."})
+        findings.append({"check": "Submission assessment", "status": "attention", "detail": "Automated assessment is unavailable or incomplete; review the contributor evidence manually."})
     elif claims.get("status") != "complete":
-        findings.append({"check": "Claim comparison", "status": "blocked", "detail": "Claim comparison did not complete; escalate for human review before approval."})
+        findings.append({"check": "Claim comparison", "status": "attention", "detail": "Claim comparison is incomplete; use human judgement and the contributor evidence."})
     else:
         findings.append({"check": "Claim comparison", "status": "attention", "detail": "Claim findings are decision support and require human judgment."})
     for job in jobs:
@@ -384,35 +445,21 @@ async def build_submission_snapshot(session: AsyncSession, project: ProjectRecor
     coordinates = {"Constitution Hill": (-26.1883, 28.0368), "Soweto Towers": (-26.2344, 27.9091), "Mapungubwe Hill": (-22.1920, 29.4311), "District Six": (-33.9273, 18.4242)}
     latitude, longitude = coordinates[content["place"]]
     derivatives = (await session.scalars(select(MediaDerivativeRecord).where(MediaDerivativeRecord.upload_id == upload.id, MediaDerivativeRecord.status == "ready").order_by(MediaDerivativeRecord.kind, MediaDerivativeRecord.id))).all()
-    attached_traces = {str(value) for value in ((content.get("plan") or {}).get("trace_id"), (content.get("research") or {}).get("traceId")) if value}
-    runs = (await session.scalars(select(WorkerRunRecord).where(WorkerRunRecord.project_id == project.id, WorkerRunRecord.worker_type.in_(["planner", "researcher"]), WorkerRunRecord.trace_id.in_(attached_traces) if attached_traces else WorkerRunRecord.id == "").order_by(WorkerRunRecord.created_at, WorkerRunRecord.id))).all()
-    frozen_content = dict(content)
-    research = content.get("research") or {}
-    source_rows = research.get("sources") if isinstance(research, dict) else []
-    normalized_sources = []
-    for index, source in enumerate(source_rows or []):
-        if not isinstance(source, dict):
-            continue
-        source_copy = dict(source)
-        source_copy["sourceId"] = str(source.get("sourceId") or source.get("id") or "source_" + hashlib.sha256(str(source.get("url") or source.get("title") or index).encode()).hexdigest()[:16])
-        collector = str(source.get("collector") or "")
-        source_copy["retrievalState"] = str(source.get("retrievalState") or {"web search": "search_snippet", "social video": "social_search_snippet", "social catalogue": "social_catalogue_entry", "youtube oembed": "metadata_only", "page": "page_excerpt", "news": "news_headline", "pasted url": "direct_url_metadata"}.get(collector, "metadata_only"))
-        normalized_sources.append(source_copy)
-    frozen_research = {**research, "sources": normalized_sources} if isinstance(research, dict) else {"sources": []}
+    supporting_document = await session.get(UploadRecord, content.get("supportingDocumentUploadId")) if content.get("supportingDocumentUploadId") else None
+    if supporting_document and (supporting_document.contributor_id != contributor.id or supporting_document.project_id != project.id or supporting_document.purpose != "supporting_document" or supporting_document.content_type != "application/pdf" or supporting_document.status != "verified"):
+        raise HTTPException(422, "The supporting PDF is not a verified document for this project")
     snapshot = {
         "title": content.get("title", ""), "contributor_name": contributor.profile.get("name", ""),
         "contributor_id": contributor.id, "language": content.get("language", "en"), "media_format": content.get("format", "audio"),
-        "audience": content.get("audience", ""), "latitude": latitude, "longitude": longitude,
+        "audience": content.get("audience", ""), "place": content.get("place", ""), "latitude": latitude, "longitude": longitude,
         "consent_given": True, "consent_scope": upload.consent_scope, "consent_recorded_at": upload.consent_recorded_at.isoformat() if upload.consent_recorded_at else None,
         "summary": content.get("transcript", ""), "claim": content.get("claim", ""), "source_url": content.get("source", ""),
-        "plan": content.get("plan"), "plan_document": content.get("planDocument"), "research": frozen_research,
-        "suggestion": content.get("suggestion", "pending"), "project_revision": frozen_content,
+        "suggestion": content.get("suggestion", "pending"),
         "revision_id": revision.id, "revision_version": revision.version,
-        "worker_run_ids": [run.id for run in runs],
-        "worker_runs": [{"runId": run.id, "traceId": run.trace_id, "workerType": run.worker_type, "status": run.status, "providerModel": run.provider_model, "createdAt": run.created_at.isoformat(), "finishedAt": run.finished_at.isoformat() if run.finished_at else None} for run in runs],
         "media_name": upload.name, "media_size": upload.size, "media_checksum": upload.checksum, "media_verified": upload.status == "verified",
         "original_media": {"uploadId": upload.id, "name": upload.name, "contentType": upload.content_type, "size": upload.size, "checksum": upload.checksum},
         "media_derivatives": [{"id": item.id, "kind": item.kind, "contentType": item.content_type, "meta": item.meta or {}} for item in derivatives],
+        "supporting_document": {"uploadId": supporting_document.id, "name": supporting_document.name, "contentType": supporting_document.content_type, "size": supporting_document.size, "checksum": supporting_document.checksum} if supporting_document else None,
         "trace_id": "trace_" + uuid4().hex, "created_at": now().isoformat(), "human_gate": "required_before_publication",
     }
     snapshot["preview_hash"] = _snapshot_hash(snapshot)
@@ -442,9 +489,10 @@ async def packet_output(session: AsyncSession, packet: SubmissionPacket) -> dict
     from .ai.jobs import list_jobs_for_submission, public_job
 
     jobs = await list_jobs_for_submission(session, packet.id)
-    policy = review_policy(packet.packet, jobs)
+    visible_packet = reviewer_packet(packet.packet)
+    policy = review_policy(visible_packet, jobs)
     assessment_job = next((job for job in jobs if job.job_type == "assessment"), None)
-    assessment = (assessment_job.result_payload or {}) if assessment_job else {}
+    assessment = reviewer_assessment((assessment_job.result_payload or {})) if assessment_job and assessment_job.result_payload else None
     transcript_job = next((job for job in jobs if job.job_type == "transcribe"), None)
     translation_job = next((job for job in jobs if job.job_type == "translate"), None)
     analysis_job = next((job for job in jobs if job.job_type == "analyze"), None)
@@ -452,7 +500,14 @@ async def packet_output(session: AsyncSession, packet: SubmissionPacket) -> dict
     source_track = {"language": transcript_draft.get("language") or packet.packet.get("language") or "en", "label": "Original · AI transcript draft", "cues": transcript_draft.get("segments") or []} if isinstance(transcript_draft, dict) and transcript_draft.get("status") == "draft" else None
     translated_tracks = ((translation_job.result_payload or {}).get("captionTracks") or []) if translation_job else []
     caption_tracks = public_caption_tracks(([source_track] if source_track else []) + translated_tracks)
-    return {**packet.packet, "contributor_id": packet.contributor_id, "contributor_profile_url": f"/asante/profiles/{packet.contributor_id}/", "submission_id": packet.id, "status": packet.status, "version": packet.version, "findings": policy["findings"], "review_policy": policy, "assessment": assessment, "transcriptDraft": (transcript_job.result_payload or {}).get("transcriptDraft") if transcript_job else None, "videoAnalysis": (analysis_job.result_payload or {}).get("videoAnalysis") if analysis_job else None, "decisions": [{"action": item.action, "reason": item.reason, "at": item.created_at.isoformat(), "reviewerId": item.reviewer_id, "assessmentVersion": item.assessment_version} for item in decisions], "media_url": f"/asante/api/v1/review/{packet.id}/media" if packet.upload_id else None, "jobs": [public_job(job) for job in jobs], "captionTracks": caption_tracks, "translations": ((translation_job.result_payload or {}).get("translations") or {}) if translation_job else {}}
+    safe_jobs = []
+    for job in jobs:
+        public = public_job(job)
+        if job.job_type == "assessment":
+            public["result"] = reviewer_assessment(public.get("result") or {})
+        safe_jobs.append(public)
+    publication = packet.packet or {}
+    return {**visible_packet, "contributor_id": packet.contributor_id, "contributor_profile_url": f"/asante/profiles/{packet.contributor_id}/", "submission_id": packet.id, "status": packet.status, "version": packet.version, "published_story_id": publication.get("publishedStoryId"), "published_slug": publication.get("publishedSlug"), "published_at": publication.get("publishedAt"), "findings": policy["findings"], "review_policy": policy, "assessment": assessment, "transcriptDraft": (transcript_job.result_payload or {}).get("transcriptDraft") if transcript_job else None, "videoAnalysis": (analysis_job.result_payload or {}).get("videoAnalysis") if analysis_job else None, "decisions": [{"action": item.action, "reason": item.reason, "at": item.created_at.isoformat(), "reviewerId": item.reviewer_id, "assessmentVersion": item.assessment_version} for item in decisions], "media_url": f"/asante/api/v1/review/{packet.id}/media" if packet.upload_id else None, "supporting_document_url": f"/asante/api/v1/review/{packet.id}/supporting-document" if packet.packet.get("supporting_document") else None, "jobs": safe_jobs, "captionTracks": caption_tracks, "translations": ((translation_job.result_payload or {}).get("translations") or {}) if translation_job else {}}
 
 
 @router.post("/submissions", status_code=201, dependencies=[Depends(mutation)])
@@ -500,6 +555,19 @@ async def review_queue(account: AccountRecord = Depends(require_reviewer), sessi
     return {"items": [await packet_output(session, packet) for packet in packets]}
 
 
+@router.post("/review/queue/ensure-jobs", dependencies=[Depends(mutation)])
+async def ensure_review_jobs(account: AccountRecord = Depends(require_reviewer), session: AsyncSession = Depends(get_session)) -> dict:
+    from .ai.jobs import enqueue_submission_jobs
+
+    packets = (await session.scalars(select(SubmissionPacket).where(SubmissionPacket.status == "pending_review"))).all()
+    queued_jobs = 0
+    for packet in packets:
+        jobs = await enqueue_submission_jobs(session, packet)
+        queued_jobs += sum(1 for job in jobs if job.status == "queued")
+    await session.commit()
+    return {"pendingPackets": len(packets), "queuedJobs": queued_jobs}
+
+
 class DecisionInput(BaseModel):
     action: Literal["approve", "request_changes", "reject", "escalate"]
     reason: str = Field(min_length=10, max_length=2000)
@@ -517,12 +585,16 @@ async def decide(submission_id: str, body: DecisionInput, account: AccountRecord
         raise HTTPException(422, "A meaningful reason is required")
     from .ai.jobs import list_jobs_for_submission
     jobs = await list_jobs_for_submission(session, packet.id)
-    policy = review_policy(packet.packet, jobs)
+    policy = review_policy(reviewer_packet(packet.packet), jobs)
     if body.action == "approve" and not policy["may_approve"]:
         raise HTTPException(409, "Resolve blocking findings before approval")
     packet.status = {"approve": "approved", "request_changes": "changes_requested", "reject": "rejected", "escalate": "escalated"}[body.action]
     packet.version += 1
     session.add(DecisionRecord(id=uuid4().hex, submission_id=packet.id, action=body.action, reason=body.reason.strip(), created_at=now(), reviewer_id=account.id, assessment_version=policy["assessment_version"]))
+    if body.action == "approve":
+        from .publish import publish_approved_submission
+
+        await publish_approved_submission(session, packet)
     await session.commit()
     return await packet_output(session, packet)
 
@@ -531,6 +603,15 @@ async def decide(submission_id: str, body: DecisionInput, account: AccountRecord
 async def review_media(submission_id: str, request: Request, account: AccountRecord = Depends(require_reviewer), session: AsyncSession = Depends(get_session)) -> Response:
     packet = await session.get(SubmissionPacket, submission_id)
     upload = await session.get(UploadRecord, packet.upload_id) if packet and packet.upload_id else None
-    if not upload or upload.status != "verified":
+    if not upload or upload.purpose != "media" or upload.status != "verified":
         raise HTTPException(404, "Media not found")
     return await run_in_threadpool(media_response, upload.object_key, request.headers.get("range"), request.method == "HEAD")
+
+
+@router.api_route("/review/{submission_id}/supporting-document", methods=["GET", "HEAD"])
+async def review_supporting_document(submission_id: str, request: Request, account: AccountRecord = Depends(require_reviewer), session: AsyncSession = Depends(get_session)) -> Response:
+    packet = await session.get(SubmissionPacket, submission_id)
+    document = await session.get(UploadRecord, (packet.packet or {}).get("supporting_document", {}).get("uploadId")) if packet else None
+    if not document or document.purpose != "supporting_document" or document.content_type != "application/pdf" or document.status != "verified":
+        raise HTTPException(404, "Supporting document not found")
+    return await run_in_threadpool(media_response, document.object_key, request.headers.get("range"), request.method == "HEAD")

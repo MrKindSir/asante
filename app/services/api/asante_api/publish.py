@@ -11,7 +11,7 @@ from sqlalchemy import cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .catalogue import public_caption_tracks
-from .models import LandmarkRecord, MediaDerivativeRecord, ProjectRecord, StoryRecord, SubmissionPacket, UploadRecord
+from .models import LandmarkRecord, MediaDerivativeRecord, ProcessingJobRecord, ProjectRecord, StoryRecord, SubmissionPacket, UploadRecord
 
 PLACE_LANDMARKS = {
     "Constitution Hill": (-26.1883, 28.0368),
@@ -51,6 +51,38 @@ def _distance_m(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float
     return 2 * radius * math.asin(math.sqrt(a))
 
 
+async def published_caption_tracks_for_submission(session: AsyncSession, packet: SubmissionPacket) -> list[dict]:
+    """Build listener caption tracks from completed, timed media-job drafts."""
+    jobs = (await session.scalars(
+        select(ProcessingJobRecord).where(
+            ProcessingJobRecord.submission_id == packet.id,
+            ProcessingJobRecord.status == "succeeded",
+        )
+    )).all()
+    results = {job.job_type: job.result_payload or {} for job in jobs}
+    tracks: list[dict] = []
+    transcript = (results.get("transcribe", {}).get("transcriptDraft") or {})
+    segments = transcript.get("segments") or []
+    if segments:
+        language = str(transcript.get("language") or (packet.packet or {}).get("language") or "en")
+        tracks.append({"language": language, "label": {"en": "English", "zu": "isiZulu", "st": "Sesotho"}.get(language, language), "cues": segments})
+    tracks.extend(results.get("translate", {}).get("captionTracks") or [])
+    return public_caption_tracks(tracks)
+
+
+async def refresh_published_captions(session: AsyncSession, packet: SubmissionPacket) -> None:
+    """Attach newly completed timed drafts to an already-published story."""
+    published_id = (packet.packet or {}).get("publishedStoryId")
+    if not published_id:
+        return
+    try:
+        story = await session.get(StoryRecord, UUID(str(published_id)))
+    except (TypeError, ValueError):
+        return
+    if story and story.status == "published" and story.active:
+        story.caption_tracks = await published_caption_tracks_for_submission(session, packet)
+
+
 async def _landmark_for_packet(session: AsyncSession, packet: SubmissionPacket, project: ProjectRecord | None) -> LandmarkRecord:
     place = ""
     if project and isinstance(project.content, dict):
@@ -86,7 +118,7 @@ async def publish_approved_submission(session: AsyncSession, packet: SubmissionP
     """Create or refresh the public story row for an approved submission."""
     snapshot = dict(packet.packet or {})
     project_revision = snapshot.get("project_revision") if isinstance(snapshot.get("project_revision"), dict) else {}
-    caption_tracks = public_caption_tracks(
+    caption_tracks = await published_caption_tracks_for_submission(session, packet) or public_caption_tracks(
         snapshot.get("caption_tracks")
         or snapshot.get("captionTracks")
         or project_revision.get("caption_tracks")

@@ -1,4 +1,4 @@
-"""Owner and reviewer endpoints for Asante planner/researcher worker runs."""
+"""Owner endpoints for Asante planner/researcher worker runs."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -250,9 +250,10 @@ async def review_worker_runs(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     del account
-    rows = (
-        await session.scalars(
-            select(WorkerRunRecord).order_by(WorkerRunRecord.created_at.desc()).limit(100)
-        )
-    ).all()
+    rows = (await session.scalars(
+        select(WorkerRunRecord)
+        .where(WorkerRunRecord.worker_type.not_in(("planner", "researcher")))
+        .order_by(WorkerRunRecord.created_at.desc())
+        .limit(100)
+    )).all()
     return {"items": [public_run(row) for row in rows]}

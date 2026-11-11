@@ -3,9 +3,13 @@
 ## Environment variable ownership
 
 - `ASANTE_*` variables belong to Asante.
-- `ASANTE_AI_API_KEY`, `ASANTE_AI_BASE_URL`, `ASANTE_AI_MODEL`, and `ASANTE_AI_PROVIDER` configure Asante AI workers (Gemini or OpenAI-compatible). `OPENAI_API_KEY` remains a fallback.
+- `ASANTE_AI_API_KEY`, `ASANTE_AI_BASE_URL`, `ASANTE_AI_MODEL`, and `ASANTE_AI_PROVIDER` configure optional cloud AI workers (Gemini or OpenAI-compatible). `OPENAI_API_KEY` remains a fallback. On live with `ASANTE_AI_BACKEND=modal`, text/vision/transcription go through Modal instead of these cloud keys.
+- Localhost Ollama: leave `ASANTE_AI_BACKEND` empty and set `ASANTE_OLLAMA_BASE_URL` / `ASANTE_OLLAMA_MODEL` (optional `ASANTE_OLLAMA_VISION_MODEL`).
+- Live Modal: set `ASANTE_AI_BACKEND=modal`, `ASANTE_MODAL_BASE_URL` (deployed ASGI URL), and `ASANTE_MODAL_SHARED_SECRET` (same value as Modal secret `asante-modal-auth`). Set `ASANTE_MODAL_WHISPER_MODEL` to a Modal/Hugging Face model name such as `tiny`; do not reuse a localhost `ASANTE_WHISPER_MODEL` filesystem path. `ASANTE_MODAL_TRANSCRIBE_TIMEOUT` defaults to 240 seconds to allow GPU/model cold start. Deploy the app from `app/services/ai/modal/asante_ollama_app.py`.
+- Live caption spend caps: `ASANTE_LIVE_CAPTION_SECONDS` (default 45), `ASANTE_LIVE_TRANSLATE_MAX_CUES` (default 12), `ASANTE_LIVE_TRANSLATE_BATCH_SIZE` (default 3), `ASANTE_LIVE_TRANSLATE_DEADLINE_SECONDS` (default 45). Localhost uses `ASANTE_CAPTION_SECONDS` / `ASANTE_TRANSLATE_*` (defaults 180s / 100 cues) unless overridden. Implemented in `asante_api/ai/caption_limits.py`.
+- After changing live AI/cap env values, recreate `api` and `job-worker` so both processes see the new settings.
 - Codex configuration and Codex secrets remain outside the Asante application environment.
-- The generated ignored root `.env.codex` holds only dedicated Codex read-only PostgreSQL/MinIO credentials. It is separate from the application `.env` and existing shell keys; see CODEX_MCP.md. Do not copy it into an application image or source it globally.
+- The generated ignored root `.env.codex` holds only dedicated Codex read-only PostgreSQL/MinIO credentials. It is separate from the application `.env` and existing shell keys; see CODEX_MCP.md. Do not copy it into an application image or source it globally. Do not put Modal tokens or `ASANTE_MODAL_SHARED_SECRET` in git.
 
 ## macOS and Linux
 
