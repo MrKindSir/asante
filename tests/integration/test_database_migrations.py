@@ -128,8 +128,8 @@ class DatabaseMigrationIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(schema, "asante")
                 self.assertTrue(postgis_version)
                 self.assertEqual(revision, "0016_requeue_review_evidence_v2")
-                self.assertEqual(landmark_count, 4)
-                self.assertEqual(published_story_count, 4)
+                self.assertEqual(landmark_count, 12)
+                self.assertEqual(published_story_count, 12)
                 self.assertEqual(draft_story_count, 1)
                 self.assertIn("using gist", location_index.lower())
             finally:
@@ -173,7 +173,7 @@ class DatabaseMigrationIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 with TestClient(app) as client:
                     self.assertEqual(client.get("/health/ready").status_code, 200)
                     landmarks = client.get("/v1/landmarks").json()["items"]
-                    self.assertEqual(len(landmarks), 5)
+                    self.assertEqual(len(landmarks), 13)
                     self.assertIn("district-six", [item["id"] for item in landmarks])
                     self.assertTrue(all(item["distance_m"] is None for item in landmarks))
 
@@ -183,7 +183,7 @@ class DatabaseMigrationIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         "/v1/stories",
                         params={"latitude": 51.5, "longitude": -0.12},
                     ).json()["items"]
-                    self.assertEqual(len(anywhere), 5)
+                    self.assertEqual(len(anywhere), 13)
                     self.assertEqual({item["id"] for item in anywhere}, {item["id"] for item in remote})
                     self.assertTrue(all(item["distance_m"] is None for item in anywhere))
                     self.assertTrue(all(item["distance_m"] > 1_000_000 for item in remote))
@@ -241,8 +241,8 @@ class DatabaseMigrationIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         ).json()
                         paged_stories.extend(page["items"])
                         cursor = page["nextCursor"]
-                    self.assertEqual(len(paged_stories), 5)
-                    self.assertEqual(len({item["id"] for item in paged_stories}), 5)
+                    self.assertEqual(len(paged_stories), 13)
+                    self.assertEqual(len({item["id"] for item in paged_stories}), 13)
                     self.assertIn("contributorName", paged_stories[0])
                     self.assertIn("mediaFormat", paged_stories[0])
 
@@ -268,10 +268,17 @@ class DatabaseMigrationIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         ["story-001"],
                     )
                     self.assertEqual(
-                        [item["id"] for item in client.get(
+                        {item["id"] for item in client.get(
                             "/v2/stories", params={"mediaFormat": "video"}
-                        ).json()["items"]],
-                        ["story-002"],
+                        ).json()["items"]},
+                        {
+                            "story-002",
+                            "testdata-ethiopia",
+                            "testdata-idi-amin",
+                            "testdata-africa-civilizations",
+                            "testdata-snake-wedding",
+                            "testdata-folktale",
+                        },
                     )
                     self.assertEqual(
                         {item["id"] for item in client.get(
