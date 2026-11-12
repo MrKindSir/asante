@@ -8,6 +8,7 @@ from uuid import UUID
 
 from geoalchemy2.elements import WKTElement
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from asante_api.database import database_url
@@ -86,30 +87,6 @@ LANDMARKS = (
         "region": "Ghana",
         "latitude": 5.6037,
         "longitude": -0.1870,
-    },
-    {
-        "id": UUID("4d5a2a4e-9e70-5e68-9e0f-0f7b6e8d6f06"),
-        "slug": "london",
-        "name": "London",
-        "region": "United Kingdom",
-        "latitude": 51.5072,
-        "longitude": -0.1276,
-    },
-    {
-        "id": UUID("4d5a2a4e-9e70-5e68-9e0f-0f7b6e8d6f07"),
-        "slug": "mexico-city",
-        "name": "Mexico City",
-        "region": "Mexico",
-        "latitude": 19.4326,
-        "longitude": -99.1332,
-    },
-    {
-        "id": UUID("4d5a2a4e-9e70-5e68-9e0f-0f7b6e8d6f08"),
-        "slug": "sydney",
-        "name": "Sydney",
-        "region": "Australia",
-        "latitude": -33.8688,
-        "longitude": 151.2093,
     },
 )
 
@@ -231,46 +208,10 @@ STORIES = (
         "transcript": "Illustrative TestData catalogue record based on a public folktale clip. Oduko is a story setting; this is not a verified community oral history.",
         "is_demo": True,
     },
-    {
-        "id": UUID("4d5a2a4e-9e70-5e68-9e0f-1f7b6e8d6f06"),
-        "slug": "world-listening-room",
-        "title": "A Story Can Travel",
-        "contributor_name": "Asante global demo",
-        "landmark_slug": "london",
-        "language": "en",
-        "media_format": "audio",
-        "status": "published",
-        "media_file": None,
-        "transcript": "Synthetic demo record showing that an Asante story can be discovered from anywhere in the world.",
-        "is_demo": True,
-    },
-    {
-        "id": UUID("4d5a2a4e-9e70-5e68-9e0f-1f7b6e8d6f07"),
-        "slug": "world-crossroads",
-        "title": "Voices Across Borders",
-        "contributor_name": "Asante global demo",
-        "landmark_slug": "mexico-city",
-        "language": "en",
-        "media_format": "audio",
-        "status": "published",
-        "media_file": None,
-        "transcript": "Synthetic demo record for the global Asante map catalogue.",
-        "is_demo": True,
-    },
-    {
-        "id": UUID("4d5a2a4e-9e70-5e68-9e0f-1f7b6e8d6f08"),
-        "slug": "world-southern-edge",
-        "title": "Listening From the Southern Edge",
-        "contributor_name": "Asante global demo",
-        "landmark_slug": "sydney",
-        "language": "en",
-        "media_format": "audio",
-        "status": "published",
-        "media_file": None,
-        "transcript": "Synthetic demo record showing a world-spanning catalogue and optional listener location.",
-        "is_demo": True,
-    },
 )
+
+STALE_NON_AFRICA_LANDMARK_SLUGS = ("london", "mexico-city", "sydney")
+STALE_NON_AFRICA_STORY_SLUGS = ("world-listening-room", "world-crossroads", "world-southern-edge")
 
 
 async def seed_public_catalogue() -> None:
@@ -279,6 +220,18 @@ async def seed_public_catalogue() -> None:
     landmark_ids = {item["slug"]: item["id"] for item in LANDMARKS}
     try:
         async with sessions.begin() as session:
+            # Keep an existing developer database aligned after the demo map
+            # was narrowed from worldwide back to Africa-wide.
+            await session.execute(
+                update(StoryRecord)
+                .where(StoryRecord.slug.in_(STALE_NON_AFRICA_STORY_SLUGS))
+                .values(active=False, status="archived")
+            )
+            await session.execute(
+                update(LandmarkRecord)
+                .where(LandmarkRecord.slug.in_(STALE_NON_AFRICA_LANDMARK_SLUGS))
+                .values(active=False)
+            )
             for landmark in LANDMARKS:
                 values = {
                     key: value

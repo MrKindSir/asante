@@ -4,8 +4,8 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { accuracyFeatures, Coordinates, landmarkFeatures } from "./map-domain";
 import { Landmark, Story } from "./story-domain";
 
-export const WORLD_MAP_CENTER: [number, number] = [0, 20];
-export const WORLD_MAP_ZOOM = 1.45;
+export const AFRICA_MAP_CENTER: [number, number] = [20, 2];
+export const AFRICA_MAP_ZOOM = 2.35;
 
 type MapOptions = {
   canvas: RefObject<HTMLDivElement>;
@@ -48,8 +48,8 @@ export function useLandmarkMap({ canvas, landmarks, coordinates, onLandmarkSelec
             },
             layers: [{ id: "streets", type: "raster", source: "streets" }],
           },
-          center: WORLD_MAP_CENTER,
-          zoom: WORLD_MAP_ZOOM,
+          center: AFRICA_MAP_CENTER,
+          zoom: AFRICA_MAP_ZOOM,
           attributionControl: { compact: false },
         });
         map.current = instance;
@@ -164,7 +164,7 @@ export function useLandmarkMap({ canvas, landmarks, coordinates, onLandmarkSelec
   }, []);
 
   const showAll = useCallback(() => {
-    map.current?.easeTo({ center: WORLD_MAP_CENTER, zoom: WORLD_MAP_ZOOM, padding: 0 });
+    map.current?.easeTo({ center: AFRICA_MAP_CENTER, zoom: AFRICA_MAP_ZOOM, padding: 0 });
   }, []);
 
   const retryMap = useCallback(() => setAttempt((current) => current + 1), []);
