@@ -1,0 +1,14 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+httpx==0.28.1
+SQLAlchemy[asyncio]==2.1.8
+psycopg[binary]==3.3.8
+alembic==1.20.1
+GeoAlchemy2==0.20.0
+minio==7.2.18
+argon2-cffi==25.1.0
+trafilatura==2.0.0
+ddgs==9.0.0
+faster-whisper==1.2.1
+av==18.1.0
+reportlab==5.1.0

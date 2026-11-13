@@ -1,0 +1,180 @@
+name: asante
+
+services:
+  codex-mcp:
+    profiles: ["codex"]
+    build:
+      context: ..
+      dockerfile: infrastructure/codex/Dockerfile
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ../.env.codex:/run/secrets/codex-asante.env:ro
+    stdin_open: true
+
+  api:
+    build:
+      context: ..
+      dockerfile: app/services/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      ASANTE_ENV: ${ASANTE_ENV:-development}
+      ASANTE_POSTGRES_HOST: postgres
+      ASANTE_POSTGRES_INTERNAL_PORT: 5432
+      # Secrets/ports: host shell profile only (${VAR:?} fails closed if unset).
+      ASANTE_POSTGRES_DB: ${ASANTE_POSTGRES_DB:?set ASANTE_POSTGRES_DB in shell profile}
+      ASANTE_POSTGRES_USER: ${ASANTE_POSTGRES_USER:?set ASANTE_POSTGRES_USER in shell profile}
+      ASANTE_POSTGRES_PASSWORD: ${ASANTE_POSTGRES_PASSWORD:?set ASANTE_POSTGRES_PASSWORD in shell profile}
+      ASANTE_MINIO_ENDPOINT: minio:9000
+      ASANTE_MINIO_BUCKET: asante-media
+      ASANTE_MINIO_ACCESS_KEY: ${ASANTE_MINIO_ROOT_USER:?set ASANTE_MINIO_ROOT_USER in shell profile}
+      ASANTE_MINIO_SECRET_KEY: ${ASANTE_MINIO_ROOT_PASSWORD:?set ASANTE_MINIO_ROOT_PASSWORD in shell profile}
+      ASANTE_AI_PROVIDER: ${ASANTE_AI_PROVIDER:-}
+      ASANTE_AI_API_KEY: ${ASANTE_AI_API_KEY:-}
+      ASANTE_AI_BASE_URL: ${ASANTE_AI_BASE_URL:-}
+      ASANTE_AI_MODEL: ${ASANTE_AI_MODEL:-}
+      ASANTE_OLLAMA_BASE_URL: ${ASANTE_OLLAMA_BASE_URL:-}
+      ASANTE_OLLAMA_MODEL: ${ASANTE_OLLAMA_MODEL:-}
+      ASANTE_OLLAMA_VISION_MODEL: ${ASANTE_OLLAMA_VISION_MODEL:-}
+      ASANTE_AI_BACKEND: ${ASANTE_AI_BACKEND:-}
+      ASANTE_MODAL_BASE_URL: ${ASANTE_MODAL_BASE_URL:-}
+      ASANTE_MODAL_SHARED_SECRET: ${ASANTE_MODAL_SHARED_SECRET:-}
+      ASANTE_MODAL_WHISPER_MODEL: ${ASANTE_MODAL_WHISPER_MODEL:-tiny}
+      ASANTE_MODAL_TRANSCRIBE_TIMEOUT: ${ASANTE_MODAL_TRANSCRIBE_TIMEOUT:-240}
+      ASANTE_LIVE_CAPTION_SECONDS: ${ASANTE_LIVE_CAPTION_SECONDS:-45}
+      ASANTE_LIVE_TRANSLATE_MAX_CUES: ${ASANTE_LIVE_TRANSLATE_MAX_CUES:-12}
+      ASANTE_LIVE_TRANSLATE_BATCH_SIZE: ${ASANTE_LIVE_TRANSLATE_BATCH_SIZE:-3}
+      ASANTE_LIVE_TRANSLATE_DEADLINE_SECONDS: ${ASANTE_LIVE_TRANSLATE_DEADLINE_SECONDS:-180}
+      ASANTE_CAPTION_SECONDS: ${ASANTE_CAPTION_SECONDS:-180}
+      ASANTE_TRANSLATE_MAX_CUES: ${ASANTE_TRANSLATE_MAX_CUES:-100}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+  job-worker:
+    build:
+      context: ..
+      dockerfile: app/services/api/Dockerfile
+    command: ["python", "-m", "asante_api.job_worker"]
+    restart: unless-stopped
+    environment:
+      ASANTE_ENV: ${ASANTE_ENV:-development}
+      ASANTE_POSTGRES_HOST: postgres
+      ASANTE_POSTGRES_INTERNAL_PORT: 5432
+      ASANTE_POSTGRES_DB: ${ASANTE_POSTGRES_DB:?set ASANTE_POSTGRES_DB in shell profile}
+      ASANTE_POSTGRES_USER: ${ASANTE_POSTGRES_USER:?set ASANTE_POSTGRES_USER in shell profile}
+      ASANTE_POSTGRES_PASSWORD: ${ASANTE_POSTGRES_PASSWORD:?set ASANTE_POSTGRES_PASSWORD in shell profile}
+      ASANTE_MINIO_ENDPOINT: minio:9000
+      ASANTE_MINIO_BUCKET: asante-media
+      ASANTE_MINIO_ACCESS_KEY: ${ASANTE_MINIO_ROOT_USER:?set ASANTE_MINIO_ROOT_USER in shell profile}
+      ASANTE_MINIO_SECRET_KEY: ${ASANTE_MINIO_ROOT_PASSWORD:?set ASANTE_MINIO_ROOT_PASSWORD in shell profile}
+      ASANTE_AI_PROVIDER: ${ASANTE_AI_PROVIDER:-}
+      ASANTE_AI_API_KEY: ${ASANTE_AI_API_KEY:-}
+      ASANTE_AI_BASE_URL: ${ASANTE_AI_BASE_URL:-}
+      ASANTE_AI_MODEL: ${ASANTE_AI_MODEL:-}
+      ASANTE_OLLAMA_BASE_URL: ${ASANTE_OLLAMA_BASE_URL:-}
+      ASANTE_OLLAMA_MODEL: ${ASANTE_OLLAMA_MODEL:-}
+      ASANTE_OLLAMA_VISION_MODEL: ${ASANTE_OLLAMA_VISION_MODEL:-}
+      ASANTE_AI_BACKEND: ${ASANTE_AI_BACKEND:-}
+      ASANTE_MODAL_BASE_URL: ${ASANTE_MODAL_BASE_URL:-}
+      ASANTE_MODAL_SHARED_SECRET: ${ASANTE_MODAL_SHARED_SECRET:-}
+      ASANTE_MODAL_WHISPER_MODEL: ${ASANTE_MODAL_WHISPER_MODEL:-tiny}
+      ASANTE_MODAL_TRANSCRIBE_TIMEOUT: ${ASANTE_MODAL_TRANSCRIBE_TIMEOUT:-240}
+      ASANTE_LIVE_CAPTION_SECONDS: ${ASANTE_LIVE_CAPTION_SECONDS:-45}
+      ASANTE_LIVE_TRANSLATE_MAX_CUES: ${ASANTE_LIVE_TRANSLATE_MAX_CUES:-12}
+      ASANTE_LIVE_TRANSLATE_BATCH_SIZE: ${ASANTE_LIVE_TRANSLATE_BATCH_SIZE:-3}
+      ASANTE_LIVE_TRANSLATE_DEADLINE_SECONDS: ${ASANTE_LIVE_TRANSLATE_DEADLINE_SECONDS:-180}
+      ASANTE_CAPTION_SECONDS: ${ASANTE_CAPTION_SECONDS:-180}
+      ASANTE_TRANSLATE_MAX_CUES: ${ASANTE_TRANSLATE_MAX_CUES:-100}
+      ASANTE_WHISPER_MODEL: ${ASANTE_WHISPER_MODEL:-/workspace/models/whisper-tiny}
+      ASANTE_JOB_IDLE_SECONDS: ${ASANTE_JOB_IDLE_SECONDS:-2}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    volumes:
+      - asante_whisper_cache:/var/cache/huggingface
+
+  asante:
+    build:
+      context: ../app/websites/asante
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      ASANTE_MAP_TILE_TOKEN: ${ASANTE_MAP_TILE_TOKEN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  dashboard:
+    build:
+      context: ../app/websites/dashboard
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_ASANTE_DIRECT_PORT: ${ASANTE_HTTP_PORT:?set ASANTE_HTTP_PORT in shell profile}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${ASANTE_BIND_HTTP_HOST:-0.0.0.0}:${ASANTE_HTTP_PORT:?set ASANTE_HTTP_PORT in shell profile}:80"
+    volumes:
+      - ./nginx/asante.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_started
+      asante:
+        condition: service_started
+      dashboard:
+        condition: service_started
+
+  postgres:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${ASANTE_POSTGRES_DB:?set ASANTE_POSTGRES_DB in shell profile}
+      POSTGRES_USER: ${ASANTE_POSTGRES_USER:?set ASANTE_POSTGRES_USER in shell profile}
+      POSTGRES_PASSWORD: ${ASANTE_POSTGRES_PASSWORD:?set ASANTE_POSTGRES_PASSWORD in shell profile}
+    ports:
+      # Real DB stays on loopback (or ASANTE_BIND_HOST). Decoys belong in a separate ops project, not Asante.
+      - "${ASANTE_BIND_HOST:?set ASANTE_BIND_HOST in shell profile}:${ASANTE_POSTGRES_PORT:?set ASANTE_POSTGRES_PORT in shell profile}:5432"
+    volumes:
+      - asante_postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: bitnamilegacy/minio:2024.12.18
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${ASANTE_MINIO_ROOT_USER:?set ASANTE_MINIO_ROOT_USER in shell profile}
+      MINIO_ROOT_PASSWORD: ${ASANTE_MINIO_ROOT_PASSWORD:?set ASANTE_MINIO_ROOT_PASSWORD in shell profile}
+      MINIO_DEFAULT_BUCKETS: ${ASANTE_MINIO_BUCKETS:?set ASANTE_MINIO_BUCKETS in shell profile}
+    ports:
+      - "${ASANTE_BIND_HOST:?set ASANTE_BIND_HOST in shell profile}:${ASANTE_MINIO_API_PORT:?set ASANTE_MINIO_API_PORT in shell profile}:9000"
+      - "${ASANTE_BIND_HOST:?set ASANTE_BIND_HOST in shell profile}:${ASANTE_MINIO_CONSOLE_PORT:?set ASANTE_MINIO_CONSOLE_PORT in shell profile}:9001"
+    volumes:
+      - asante_minio_data:/data
+
+volumes:
+  asante_postgres_data:
+  asante_minio_data:
+  asante_whisper_cache:

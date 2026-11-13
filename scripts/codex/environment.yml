@@ -1,0 +1,5 @@
+name: asante-codex
+channels:
+  - defaults
+dependencies:
+  - python=3.12
