@@ -438,10 +438,10 @@ export default function ContributorChat(props: Props) {
         </div>}
         <footer className="portal-chat-profile">
           <button type="button" className="portal-profile-control" data-guide="portal-role-landing" onClick={() => setPopup("profile")}><span className="avatar">{profile.name.slice(0, 2).toUpperCase()}</span><span><strong>{profile.name}</strong><small>{account.email}</small><small>Profile settings</small></span><span aria-hidden="true">›</span></button>
-          <button type="button" className="quiet portal-guide-replay" data-guide="portal-replay" onClick={onPortalGuideReplay}>Replay portal guide</button>
-          <button type="button" className="quiet portal-guide-replay" data-guide="portal-research-guide-replay" disabled={!project} onClick={onPortalResearchGuideReplay}>Replay research guide</button>
-          <button type="button" className="quiet portal-guide-replay" data-guide="portal-media-guide-replay" disabled={!project} onClick={onPortalMediaGuideReplay}>Replay media guide</button>
-          <button type="button" className="quiet portal-guide-replay" data-guide="portal-submit-guide-replay" disabled={!project || Boolean(project.submissionId)} onClick={onPortalSubmitGuideReplay}>Replay submit guide</button>
+          <button type="button" className="quiet portal-guide-replay" data-guide="portal-replay" onClick={onPortalGuideReplay}>Play Portal Guide</button>
+          <button type="button" className="quiet portal-guide-replay" data-guide="portal-research-guide-replay" disabled={!project} onClick={onPortalResearchGuideReplay}>Play Research Guide</button>
+          <button type="button" className="quiet portal-guide-replay" data-guide="portal-media-guide-replay" disabled={!project} onClick={onPortalMediaGuideReplay}>Play Media Guide</button>
+          <button type="button" className="quiet portal-guide-replay" data-guide="portal-submit-guide-replay" disabled={!project || Boolean(project.submissionId)} onClick={onPortalSubmitGuideReplay}>Play Submit Guide</button>
           <button type="button" className="quiet" onClick={() => void flushOpenForm().then(onSignOut).catch(() => undefined)}>Sign out</button>
         </footer>
       </aside>
