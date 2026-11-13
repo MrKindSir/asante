@@ -31,6 +31,7 @@ class ApiRouteTests(unittest.TestCase):
     def test_plan_route_returns_worker_contract(self):
         response = self.client.post(
             "/v1/story-projects/plan",
+            headers={"X-Asante-Request": "1", "Origin": "http://testserver"},
             json={
                 "topic": "A river memory",
                 "place_name": "Soweto",
@@ -45,6 +46,10 @@ class ApiRouteTests(unittest.TestCase):
         self.assertTrue(body["project_id"].startswith("project_"))
         self.assertIn("human reviewer", body["human_gate"].lower())
         self.assertTrue(body["worker_steps"])
+
+    def test_plan_route_rejects_requests_without_asante_mutation_marker(self):
+        response = self.client.post("/v1/story-projects/plan", json={"topic": "A river memory", "place_name": "Soweto", "language": "zu", "media_format": "audio", "audience": "local listeners"})
+        self.assertEqual(response.status_code, 403)
 
     def test_private_workspace_requires_session(self):
         self.assertEqual(self.client.get("/v1/workspace").status_code, 401)

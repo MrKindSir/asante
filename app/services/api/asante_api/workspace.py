@@ -21,7 +21,7 @@ from starlette.responses import StreamingResponse
 from .database import get_session
 from .models import ContributorRecord, WorkspaceSession, ProjectRecord, ProjectRevision, UploadRecord, SubmissionPacket, DecisionRecord, AccountRecord, MediaDerivativeRecord
 from .storage import media_response, storage_client, media_bucket
-from .auth import mutation, optional_account, public_account, require_contributor, require_reviewer
+from .auth import _set_csrf_cookie, mutation, optional_account, public_account, require_contributor, require_reviewer, ACCOUNT_COOKIE
 from .catalogue import list_published_stories, public_caption_tracks
 from .research_brief import ResearchBrief, brief_complete, research_input_hash
 
@@ -193,6 +193,9 @@ async def workspace_output(session: AsyncSession, contributor: ContributorRecord
 async def open_workspace(request: Request, response: Response, session: AsyncSession = Depends(get_session)) -> dict:
     account = await optional_account(request, session)
     if account:
+        token = request.cookies.get(ACCOUNT_COOKIE, "")
+        if token:
+            _set_csrf_cookie(request, response, token)
         return await workspace_output(session, await session.get(ContributorRecord, account.contributor_id))
     token = request.cookies.get(COOKIE, "")
     record = await session.get(WorkspaceSession, hashlib.sha256(token.encode()).hexdigest()) if token else None
@@ -206,6 +209,7 @@ async def open_workspace(request: Request, response: Response, session: AsyncSes
         session.add(WorkspaceSession(token_hash=hashlib.sha256(token.encode()).hexdigest(), contributor_id=contributor.id, expires_at=now() + timedelta(days=90)))
         await session.commit()
     response.set_cookie(COOKIE, token, httponly=True, secure=request.headers.get("x-forwarded-proto", request.url.scheme) == "https", samesite="strict", max_age=90 * 86400, path="/asante/api")
+    _set_csrf_cookie(request, response, token)
     response.headers["Cache-Control"] = "no-store"
     return await workspace_output(session, contributor)
 
@@ -217,7 +221,7 @@ async def get_workspace(response: Response, contributor: ContributorRecord = Dep
 
 
 class PreferenceInput(BaseModel):
-    key: str = Field(pattern=r"^asante\.(onboarding\.v2|playback\.[a-zA-Z0-9_-]{1,100}|lowData|liveLocation)$")
+    key: str = Field(pattern=r"^asante\.(onboarding\.v2|portalGuide\.v1|portalResearchGuide\.v1|portalMediaGuide\.v1|portalSubmitGuide\.v1|playback\.[a-zA-Z0-9_-]{1,100}|lowData|liveLocation)$")
     value: str | None = Field(default=None, max_length=256)
 
 

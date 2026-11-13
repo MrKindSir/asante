@@ -1,4 +1,4 @@
-import { api, Plan, ResearchPacket, Story } from "./story-domain";
+import { api, mutationHeaders, Plan, ResearchPacket, Story } from "./story-domain";
 import { FieldReportDocument } from "./plan-document";
 
 export type Profile = { name: string; email: string; bio: string; language: string };
@@ -15,7 +15,7 @@ export type SaveProjectOptions = { background?: boolean };
 export type ResearchBrief = { knownMaterial: string; questions: string; context: string; priorities: string; uncertainties: string };
 export type ResearchFlow = { status: "incomplete" | "saved" | "running" | "planned" | "completed" | "failed"; workerType?: "planner" | "researcher"; inputHash: string; runId?: string; safeError?: string };
 export type MediaJob = {
-  jobId: string; projectId?: string; jobType: "transcribe" | "translate" | "analyze" | string;
+  jobId: string; projectId?: string; jobType: "hls" | "transcribe" | "translate" | "analyze" | string;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | string;
   progress: number; safeError?: string; createdAt?: string | null; finishedAt?: string | null;
 };
@@ -97,7 +97,7 @@ export function uploadFile(url: string, file: File, onProgress: (percent: number
     const abort = () => request.abort();
     signal.addEventListener("abort", abort, { once: true });
     request.open("PUT", url);
-    request.setRequestHeader("X-Asante-Request", "1");
+    for (const [name, value] of Object.entries(mutationHeaders(false))) request.setRequestHeader(name, value);
     request.setRequestHeader("Content-Type", file.type);
     request.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100)); };
     request.onload = () => { signal.removeEventListener("abort", abort); if (request.status >= 200 && request.status < 300) resolve(); else reject(new Error("Upload could not be verified. Check the file type, size, ten-minute limit and connection, then retry.")); };

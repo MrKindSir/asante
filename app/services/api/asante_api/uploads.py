@@ -156,7 +156,7 @@ async def upload_content(upload_id: str, request: Request, contributor: Contribu
                             MediaDerivativeRecord(
                                 id=derivative_id,
                                 upload_id=upload.id,
-                                kind=kind if kind in {"audio_track", "poster", "keyframe"} else "keyframe",
+                                kind=kind if kind in {"audio_track", "poster", "keyframe", "hls_playlist"} else "keyframe",
                                 object_key=object_key,
                                 content_type=item["contentType"],
                                 status="ready",

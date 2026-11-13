@@ -261,7 +261,7 @@ class ProcessingJobRecord(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     __table_args__ = (
         CheckConstraint(
-            "job_type IN ('assessment', 'relevance', 'transcribe', 'translate', 'analyze')",
+            "job_type IN ('assessment', 'relevance', 'transcribe', 'translate', 'analyze', 'hls')",
             name="ck_processing_job_type",
         ),
         CheckConstraint(

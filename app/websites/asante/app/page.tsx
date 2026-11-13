@@ -1,5 +1,5 @@
-import MapView from "./components/MapView";
+import { redirect } from "next/navigation";
 
 export default function HomePage() {
-  return <MapView />;
+  redirect("/map/");
 }

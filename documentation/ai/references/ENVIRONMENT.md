@@ -6,6 +6,7 @@
 - `ASANTE_AI_API_KEY`, `ASANTE_AI_BASE_URL`, `ASANTE_AI_MODEL`, and `ASANTE_AI_PROVIDER` configure optional cloud AI workers (Gemini or OpenAI-compatible). `OPENAI_API_KEY` remains a fallback. On live with `ASANTE_AI_BACKEND=modal`, text/vision/transcription go through Modal instead of these cloud keys.
 - Localhost Ollama: leave `ASANTE_AI_BACKEND` empty and set `ASANTE_OLLAMA_BASE_URL` / `ASANTE_OLLAMA_MODEL` (optional `ASANTE_OLLAMA_VISION_MODEL`).
 - Live Modal: set `ASANTE_AI_BACKEND=modal`, `ASANTE_MODAL_BASE_URL` (deployed ASGI URL), and `ASANTE_MODAL_SHARED_SECRET` (same value as Modal secret `asante-modal-auth`). Set `ASANTE_MODAL_WHISPER_MODEL` to a Modal/Hugging Face model name such as `tiny`; do not reuse a localhost `ASANTE_WHISPER_MODEL` filesystem path. `ASANTE_MODAL_TRANSCRIBE_TIMEOUT` defaults to 240 seconds to allow GPU/model cold start. Deploy the app from `app/services/ai/modal/asante_ollama_app.py`.
+- Modal **account** CLI token (`MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`, profile e.g. `vmafunisa`) is for operator deploy (`modal deploy` / `modal token set`) only. Keep it in the **system shell env** (`~/.zshrc` / live `/root/.bashrc`) and `~/.modal.toml`. Never put it in the Asante git tree, `.env.example`, or a committed file. Do not inject it into the API/`job-worker` containers; those use `ASANTE_MODAL_SHARED_SECRET` against the deployed Modal HTTP app.
 - Live caption spend caps: `ASANTE_LIVE_CAPTION_SECONDS` (default 45), `ASANTE_LIVE_TRANSLATE_MAX_CUES` (default 12), `ASANTE_LIVE_TRANSLATE_BATCH_SIZE` (default 3), `ASANTE_LIVE_TRANSLATE_DEADLINE_SECONDS` (default 45). Localhost uses `ASANTE_CAPTION_SECONDS` / `ASANTE_TRANSLATE_*` (defaults 180s / 100 cues) unless overridden. Implemented in `asante_api/ai/caption_limits.py`.
 - After changing live AI/cap env values, recreate `api` and `job-worker` so both processes see the new settings.
 - Codex configuration and Codex secrets remain outside the Asante application environment.
@@ -13,10 +14,20 @@
 
 ## macOS and Linux
 
-For a shell session, load the Asante variables from `.zshrc` or `.bashrc`:
+Asante Compose **does not** read ports/passwords from a committed file or from hardcoded Compose defaults. Export them in the host shell profile, then start with `scripts/asante/compose.sh` (no `--env-file`).
+
+- Localhost: `~/.zshrc` (and optionally `~/.zprofile`)
+- Live: `/root/.bashrc` (and/or `/root/.profile`)
+- Real Postgres/MinIO publish on `ASANTE_BIND_HOST` (use `127.0.0.1`)
+- HTTP publish host is `ASANTE_BIND_HTTP_HOST`: localhost `127.0.0.1`; live HubTweak edge uses `http://172.17.0.1:18082` (or the live profile port), so live sets `ASANTE_BIND_HTTP_HOST=172.17.0.1` (not the public NIC). Drop eth0 access to the Asante HTTP publish port and private DB ports with iptables as a second layer.
+- Scanner decoys are **not** part of Asante. They live in a separate HaMafunisa Honeypot project and must not be synced with the Asante repo.
+- Cloudflare (optional): orange-cloud the **website** hostname for HTTP/S only. Do **not** put Postgres/MinIO/decoy TCP through normal Cloudflare proxy; that needs Spectrum (paid) and is unnecessary when DB is loopback-bound.
+
+For a shell session:
 
 ```bash
 source ~/.zshrc
+./scripts/asante/compose.sh up -d
 ```
 
 ### Codex host scripts and checks

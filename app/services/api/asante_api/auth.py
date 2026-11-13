@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
 import secrets
 from typing import Literal
 from uuid import uuid4
@@ -22,6 +23,9 @@ from .models import AccountRecord, AccountSession, ContributorRecord, LoginAttem
 
 router = APIRouter(prefix="/v1/auth")
 ACCOUNT_COOKIE = "asante_account"
+WORKSPACE_COOKIE = "asante_workspace"
+CSRF_COOKIE = "asante_csrf"
+CSRF_HEADER = "x-asante-csrf"
 HASHER = PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1)
 DUMMY_HASH = HASHER.hash(secrets.token_urlsafe(32))
 
@@ -34,27 +38,65 @@ def token_hash(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def csrf_token(session_token: str) -> str:
+    """Derive a browser-readable token that is bound to one opaque session."""
+    return hmac.new(session_token.encode(), b"asante-csrf-v1", hashlib.sha256).hexdigest()
+
+
+def _cookie(request: Request, name: str) -> str | None:
+    value = request.cookies.get(name)
+    return value if isinstance(value, str) and value else None
+
+
+def _set_csrf_cookie(request: Request, response: Response, session_token: str) -> None:
+    response.set_cookie(
+        CSRF_COOKIE,
+        csrf_token(session_token),
+        max_age=7 * 86400 if session_token == _cookie(request, ACCOUNT_COOKIE) else 90 * 86400,
+        httponly=False,
+        secure=request.headers.get("x-forwarded-proto", request.url.scheme) == "https",
+        samesite="strict",
+        # The portal and reviewer dashboard live outside the API prefix and
+        # must be able to read this non-HttpOnly value to send the header.
+        path="/asante",
+    )
+
+
 def mutation(request: Request) -> None:
-    """Allow same-site browser mutations; tolerate TLS termination at the edge."""
+    """Allow same-site browser mutations with a session-bound CSRF token."""
     if request.headers.get("x-asante-request") != "1":
         raise HTTPException(403, "Use the Asante application to make this request")
     origin = (request.headers.get("origin") or "").rstrip("/")
-    if not origin:
+    if origin:
+        proto = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip().lower()
+        host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
+        if not host:
+            raise HTTPException(403, "Use the Asante application to make this request")
+        if ":" in host:
+            name, _, port = host.rpartition(":")
+            if (proto == "https" and port == "443") or (proto == "http" and port == "80"):
+                host = name
+        expected = {f"{proto}://{host}"}
+        # Edge HTTPS often terminates before the Asante proxy, which still sees http.
+        if proto == "http":
+            expected.add(f"https://{host}")
+        if origin not in expected:
+            raise HTTPException(403, "Use the Asante application to make this request")
+
+    account_token = _cookie(request, ACCOUNT_COOKIE)
+    workspace_token = _cookie(request, WORKSPACE_COOKIE)
+    session_token = account_token or workspace_token
+    if not session_token:
         return
-    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip().lower()
-    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
-    if not host:
-        raise HTTPException(403, "Use the Asante application to make this request")
-    if ":" in host:
-        name, _, port = host.rpartition(":")
-        if (proto == "https" and port == "443") or (proto == "http" and port == "80"):
-            host = name
-    expected = {f"{proto}://{host}"}
-    # Edge HTTPS often terminates before the Asante proxy, which still sees http.
-    if proto == "http":
-        expected.add(f"https://{host}")
-    if origin not in expected:
-        raise HTTPException(403, "Use the Asante application to make this request")
+    path = request.url.path if isinstance(request.url.path, str) else ""
+    # Authentication and workspace-session calls bootstrap/recover the readable token.
+    if path.endswith("/auth/login") or path.endswith("/auth/register") or path.endswith("/workspace/session"):
+        return
+    presented = request.headers.get(CSRF_HEADER)
+    stored = _cookie(request, CSRF_COOKIE)
+    expected_token = csrf_token(session_token)
+    if not presented or not stored or not hmac.compare_digest(presented, expected_token) or not hmac.compare_digest(stored, expected_token):
+        raise HTTPException(403, "A valid Asante CSRF token is required")
 
 
 def public_account(account: AccountRecord) -> dict:
@@ -127,7 +169,9 @@ async def issue_session(request: Request, response: Response, session: AsyncSess
     token = secrets.token_urlsafe(48)
     session.add(AccountSession(token_hash=token_hash(token), account_id=account.id, expires_at=now() + timedelta(days=7)))
     await session.commit()
-    response.set_cookie(ACCOUNT_COOKIE, token, max_age=7 * 86400, httponly=True, secure=request.headers.get("x-forwarded-proto", request.url.scheme) == "https", samesite="strict", path="/asante/api")
+    secure = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+    response.set_cookie(ACCOUNT_COOKIE, token, max_age=7 * 86400, httponly=True, secure=secure, samesite="strict", path="/asante/api")
+    _set_csrf_cookie(request, response, token)
     response.headers["Cache-Control"] = "no-store"
 
 
@@ -200,6 +244,7 @@ async def logout(request: Request, response: Response, session: AsyncSession = D
         await session.execute(delete(AccountSession).where(AccountSession.token_hash == token_hash(token)))
         await session.commit()
     response.delete_cookie(ACCOUNT_COOKIE, path="/asante/api", httponly=True, samesite="strict")
+    response.delete_cookie(CSRF_COOKIE, path="/asante", samesite="strict")
     response.delete_cookie("asante_review_media", path="/asante/api/v1/review")
     response.headers["Cache-Control"] = "no-store"
     return {"signedOut": True}

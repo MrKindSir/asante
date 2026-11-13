@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import FieldReport from "../../components/FieldReport";
 import { FieldReportDocument } from "../../components/plan-document";
+import { mutationHeaders } from "../../components/story-domain";
 
 type SharedPlanData = { title: string; document: FieldReportDocument; role: string; canEdit: boolean; version: number };
 
@@ -27,7 +28,8 @@ export default function SharedPlan({ token }: { token: string }) {
     if (!plan) return;
     const response = await fetch(`/asante/api/v1/plans/share/${encodeURIComponent(token)}`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json", "X-Asante-Request": "1" },
+      credentials: "include",
+      headers: mutationHeaders(),
       body: JSON.stringify({ expectedVersion: plan.version, document }),
     });
     if (!response.ok) {

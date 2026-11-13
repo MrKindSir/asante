@@ -128,7 +128,6 @@ export default function MapView() {
       if (!liveLocationRef.current) locate();
     }, 15000);
     return () => window.clearTimeout(timer);
-    // Ask once after prefs load while live location is still off.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefsReady]);
 

@@ -7,7 +7,8 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-COMPOSE = ["docker", "compose", "--env-file", ".env", "-f", "infrastructure/docker-compose.yml"]
+# Prefer process environment (shell profile). Do not load secrets from a repo .env file.
+COMPOSE = ["docker", "compose", "-f", "infrastructure/docker-compose.yml"]
 READER_ROLE = "codex_asante_reader"
 INSPECTION_SCHEMA = "codex_asante_inspection"
 SERVER_NAME = "codex_asante_readonly"
@@ -60,16 +61,15 @@ def read_values(path: Path, allowed: set[str]) -> dict[str, str]:
 
 
 def app_values() -> dict[str, str]:
-    values = {
-        "ASANTE_POSTGRES_DB": "asante", "ASANTE_POSTGRES_USER": "asante",
-        "ASANTE_POSTGRES_PASSWORD": "asante_local_dev_only",
-        "ASANTE_MINIO_ROOT_USER": "asante",
-        "ASANTE_MINIO_ROOT_PASSWORD": "asante_minio_local_dev_only",
-        "ASANTE_MINIO_BUCKETS": "asante-media", "ASANTE_HTTP_PORT": "80",
-    }
-    values.update(read_values(ROOT / ".env", APP_KEYS))
-    values.update({key: os.environ[key] for key in APP_KEYS if key in os.environ})
-    return values
+    """Resolve Asante app settings from the shell environment only."""
+    missing = [key for key in APP_KEYS if not (os.environ.get(key) or "").strip()]
+    if missing:
+        raise RuntimeError(
+            "Missing Asante shell profile values: "
+            + ", ".join(missing)
+            + ". Export them from ~/.zshrc (or the live profile), then retry."
+        )
+    return {key: os.environ[key].strip() for key in APP_KEYS}
 
 
 def reader_values() -> dict[str, str]:

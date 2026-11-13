@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "app/services/api"))
 from asante_api.ai.workers import fixture_plan, run_planner, run_verifier  # noqa: E402
 from asante_api.ai.workers import run_researcher  # noqa: E402
 from asante_api.ai.research import collect_evidence, is_safe_url, seed_social_matches, _evidence_item  # noqa: E402
-from asante_api.media_process import extract_audio_track, process_upload_file, probe_media  # noqa: E402
+from asante_api.media_process import create_hls_1080p, extract_audio_track, process_upload_file, probe_media  # noqa: E402
 from asante_api.ai import jobs as processing_jobs  # noqa: E402
 from asante_api.ai.provider import ask_model, ask_model_media  # noqa: E402
 
@@ -183,6 +183,21 @@ class MediaProcessTests(unittest.TestCase):
             frames = [item for item in processed["derivatives"] if item["kind"] == "keyframe"]
             self.assertGreaterEqual(len(frames), 1)
             self.assertLessEqual(len(frames), 4)
+            self.assertNotIn("hls_playlist", kinds)
+
+    def test_create_hls_1080p_builds_master_and_quality_package(self):
+        with tempfile.TemporaryDirectory(prefix="asante-hls-unit-") as directory:
+            package = create_hls_1080p(FIXTURES / "sample_video.mp4", Path(directory) / "hls")
+            master = Path(package["path"])
+            quality = master.parent / "1080p" / "playlist.m3u8"
+            self.assertEqual(package["kind"], "hls_playlist")
+            self.assertEqual(package["profile"], "1080p")
+            self.assertTrue(master.exists())
+            self.assertTrue(quality.exists())
+            self.assertIn("1080p/playlist.m3u8", master.read_text(encoding="utf-8"))
+            self.assertGreaterEqual(package["segmentCount"], 1)
+            self.assertLessEqual(int(package["height"]), 1080)
+            self.assertTrue(any((master.parent / "1080p").glob("segment_*.ts")))
 
     def test_folktale_clip_fixture_from_testdata(self):
         clip = FIXTURES / "folktale_clip.mp4"
@@ -259,7 +274,7 @@ class VideoJobTests(unittest.TestCase):
             packet={"media_format": "video", "title": "Video story", "media_derivatives": [{"id": "derivative-audio"}]},
         )
         created = asyncio.run(processing_jobs.enqueue_submission_jobs(session, packet))
-        self.assertEqual({job.job_type for job in created}, {"assessment", "transcribe", "translate", "analyze"})
+        self.assertEqual({job.job_type for job in created}, {"assessment", "hls", "transcribe", "translate", "analyze"})
         self.assertTrue(all(job.status == "queued" for job in created))
         self.assertEqual(created[0].input_payload["object_key"], "private/original.mp4")
         self.assertEqual(created[0].input_payload["media_derivatives"]["audio_track"]["objectKey"], "private/audio.wav")
@@ -301,6 +316,37 @@ class VideoJobTests(unittest.TestCase):
         self.assertTrue(all(job.submission_id is None for job in created))
         self.assertEqual(created[0].input_payload["captionLimits"]["captionSeconds"], 45)
         self.assertEqual(created[0].input_payload["captionLimits"]["translateMaxCues"], 12)
+
+    def test_verified_draft_video_enqueues_hls_job(self):
+        class Rows:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def all(self):
+                return self.rows
+
+        class FakeSession:
+            def __init__(self):
+                self.added = []
+                self.calls = 0
+
+            async def scalars(self, _query):
+                self.calls += 1
+                if self.calls == 1:
+                    return Rows([])
+                return Rows([])
+
+            def add(self, job):
+                self.added.append(job)
+
+            async def flush(self):
+                return None
+
+        project = SimpleNamespace(id="project-video", contributor_id="contributor-video", content={"title": "Draft video", "language": "en", "format": "video"})
+        upload = SimpleNamespace(id="upload-video", purpose="media", status="verified", content_type="video/mp4", name="clip.mp4", object_key="private/clip.mp4")
+        created = asyncio.run(processing_jobs.enqueue_project_media_jobs(FakeSession(), project=project, upload=upload))
+        self.assertEqual({job.job_type for job in created}, {"hls", "transcribe", "translate", "analyze"})
+        self.assertEqual(next(job for job in created if job.job_type == "hls").priority, 15)
 
     def test_submission_jobs_requeue_cancelled_work_and_refresh_inputs(self):
         cancelled = SimpleNamespace(

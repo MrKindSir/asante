@@ -49,7 +49,7 @@ async function completeBrief() {
 }
 beforeEach(async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  stored = { account: { id: "account-a", email: profile.email, profileId: "profile-a", role: "contributor" }, profile, projects: [structuredClone(legacy)], preferences: {} };
+  stored = { account: { id: "account-a", email: profile.email, profileId: "profile-a", role: "contributor" }, profile, projects: [structuredClone(legacy)], preferences: { "asante.portalGuide.v1": JSON.stringify({ version: 1, step: 5 }) } };
   requests.length = 0; failSave = false; failWorker = false; workerGate = null; saveGate = null; history = [];
   navigation.params = new URLSearchParams();
   vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
@@ -180,7 +180,7 @@ it("ignores late results after the account changes", async () => {
   await openLegacy(); await click("Complete research brief"); await completeBrief();
   let release!: () => void; workerGate = new Promise<void>((resolve) => { release = resolve; });
   await click("Save and start research");
-  stored = { account: { id: "account-b", profileId: "profile-b", email: "other@example.test", role: "contributor" }, profile: { ...profile, name: "Other contributor" }, projects: [], preferences: {} };
+  stored = { account: { id: "account-b", profileId: "profile-b", email: "other@example.test", role: "contributor" }, profile: { ...profile, name: "Other contributor" }, projects: [], preferences: { "asante.portalGuide.v1": JSON.stringify({ version: 1, step: 5 }) } };
   await act(async () => { window.dispatchEvent(new Event("focus")); });
   await act(async () => release());
   expect(container.textContent).toContain("Other contributor");

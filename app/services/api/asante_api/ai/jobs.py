@@ -17,7 +17,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
-from ..media_process import extract_audio_track, extract_keyframes, probe_media, run_command
+from ..media_process import MediaProcessError, create_hls_1080p, extract_audio_track, extract_keyframes, probe_media, run_command
 from ..models import MediaDerivativeRecord, ProcessingJobRecord, ProjectRecord, SubmissionPacket, UploadRecord
 from ..storage import media_bucket, storage_client
 from .provider import ask_model_detailed, ask_model_media, provider_config
@@ -35,6 +35,7 @@ logger = logging.getLogger("asante.jobs")
 
 JOB_PRIORITIES = {
     "assessment": 10,
+    "hls": 15,
     "transcribe": 20,
     "translate": 30,
     "analyze": 40,
@@ -137,6 +138,12 @@ def _progress_event(job: ProcessingJobRecord, progress: int) -> tuple[str, str]:
             35: ("Checking the video stream", "Probing the media to confirm that a video stream is available."),
             60: ("Selecting scene frames", "Extracting up to four keyframes for visible-scene observations."),
         },
+        "hls": {
+            15: ("Opening the verified video", "Loading the original recording for HLS conversion."),
+            35: ("Preparing the 1080p package", "Creating a HubTweak-style master playlist and 1080p segments."),
+            70: ("Storing the stream package", "Uploading the HLS playlist and segments to private media storage."),
+            90: ("Recording stream readiness", "Saving the HLS derivative reference for review and publish."),
+        },
     }
     return stages.get(getattr(job, "job_type", ""), {}).get(progress, (f"Worker progress · {progress}%", "The worker recorded a progress checkpoint."))
 
@@ -205,6 +212,7 @@ async def enqueue_submission_jobs(session: AsyncSession, packet: SubmissionPacke
             draft.lease_expires_at = None
     job_types = {"assessment": JOB_PRIORITIES["assessment"], "transcribe": JOB_PRIORITIES["transcribe"], "translate": JOB_PRIORITIES["translate"]}
     if snapshot.get("media_format") == "video":
+        job_types["hls"] = JOB_PRIORITIES["hls"]
         job_types["analyze"] = JOB_PRIORITIES["analyze"]
     created: list[ProcessingJobRecord] = list(existing)
     created_at = now()
@@ -272,6 +280,7 @@ async def enqueue_project_media_jobs(
     )
     job_types = {"transcribe": JOB_PRIORITIES["transcribe"], "translate": JOB_PRIORITIES["translate"]}
     if media_format == "video":
+        job_types["hls"] = JOB_PRIORITIES["hls"]
         job_types["analyze"] = JOB_PRIORITIES["analyze"]
     existing = list(
         (
@@ -727,6 +736,138 @@ async def _run_translate(session: AsyncSession, job: ProcessingJobRecord, packet
     return {"summary": f"Prepared {len(caption_tracks)} timed translation draft(s).", "translations": translations, "captionTracks": caption_tracks}
 
 
+def _hls_content_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".m3u8":
+        return "application/vnd.apple.mpegurl"
+    if suffix == ".ts":
+        return "video/mp2t"
+    return "application/octet-stream"
+
+
+async def _persist_hls_derivative(
+    session: AsyncSession,
+    *,
+    job: ProcessingJobRecord,
+    upload_id: str,
+    master_key: str,
+    package: dict[str, Any],
+) -> dict[str, Any]:
+    """Store or replace the ready HLS playlist derivative and project/submission references."""
+    reference = {
+        "objectKey": master_key,
+        "contentType": "application/vnd.apple.mpegurl",
+        "profile": package.get("profile") or "1080p",
+        "width": package.get("width"),
+        "height": package.get("height"),
+        "bitrateKbps": package.get("bitrateKbps"),
+        "segmentCount": package.get("segmentCount"),
+        "duration": package.get("duration"),
+        "kind": "hls_playlist",
+    }
+    existing = await session.scalar(
+        select(MediaDerivativeRecord).where(
+            MediaDerivativeRecord.upload_id == upload_id,
+            MediaDerivativeRecord.kind == "hls_playlist",
+        )
+    )
+    if existing:
+        existing.object_key = master_key
+        existing.content_type = "application/vnd.apple.mpegurl"
+        existing.status = "ready"
+        existing.meta = {key: value for key, value in reference.items() if key != "objectKey"}
+        derivative_id = existing.id
+    else:
+        derivative_id = uuid4().hex
+        session.add(
+            MediaDerivativeRecord(
+                id=derivative_id,
+                upload_id=upload_id,
+                kind="hls_playlist",
+                object_key=master_key,
+                content_type="application/vnd.apple.mpegurl",
+                status="ready",
+                meta={key: value for key, value in reference.items() if key != "objectKey"},
+            )
+        )
+    reference["id"] = derivative_id
+
+    project = await session.get(ProjectRecord, job.project_id, with_for_update=True)
+    if project:
+        content = dict(project.content or {})
+        derivatives = dict(content.get("mediaDerivatives") or {})
+        derivatives["hls"] = reference
+        content["mediaDerivatives"] = derivatives
+        project.content = content
+
+    if job.submission_id:
+        packet = await session.get(SubmissionPacket, job.submission_id, with_for_update=True)
+        if packet:
+            snapshot = dict(packet.packet or {})
+            derivatives = dict(snapshot.get("mediaDerivatives") or {})
+            derivatives["hls"] = reference
+            snapshot["mediaDerivatives"] = derivatives
+            packet.packet = snapshot
+    return reference
+
+
+async def _run_hls(session: AsyncSession, job: ProcessingJobRecord, packet: SubmissionPacket) -> dict[str, Any]:
+    await _set_progress(session, job, 15)
+    payload = job.input_payload or {}
+    object_key = payload.get("object_key")
+    upload_id = payload.get("upload_id") or getattr(packet, "upload_id", None)
+    media_format = str(payload.get("media_format") or (packet.packet or {}).get("media_format") or "")
+    if media_format != "video" or not object_key or not upload_id:
+        return {
+            "summary": "HLS conversion skipped for non-video or missing upload.",
+            "status": "skipped",
+            "hls": None,
+        }
+    client = storage_client()
+    with tempfile.TemporaryDirectory(prefix="asante-hls-") as temporary:
+        source = Path(temporary) / "source.bin"
+        package_dir = Path(temporary) / "hls"
+        await _download_upload(str(object_key), source)
+        await _set_progress(session, job, 35)
+        # ffmpeg 1080p packages can exceed the default lease; hold the job through encode.
+        job.lease_expires_at = now() + timedelta(seconds=max(LEASE_SECONDS, 900))
+        await session.flush()
+        package = await run_in_threadpool(create_hls_1080p, source, package_dir)
+        await _set_progress(session, job, 70)
+        prefix = f"derivatives/{upload_id}/hls"
+        uploaded: list[str] = []
+        for path in sorted(package_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(package_dir).as_posix()
+            key = f"{prefix}/{relative}"
+            await run_in_threadpool(
+                client.fput_object,
+                media_bucket(),
+                key,
+                str(path),
+                content_type=_hls_content_type(path),
+            )
+            uploaded.append(key)
+        master_key = f"{prefix}/playlist.m3u8"
+        if master_key not in uploaded:
+            raise MediaProcessError("HLS master playlist was not uploaded")
+        await _set_progress(session, job, 90)
+        reference = await _persist_hls_derivative(
+            session,
+            job=job,
+            upload_id=str(upload_id),
+            master_key=master_key,
+            package=package,
+        )
+    return {
+        "summary": f"Prepared 1080p HLS package with {package.get('segmentCount', 0)} segments.",
+        "status": "ready",
+        "hls": reference,
+        "uploadedObjects": len(uploaded),
+    }
+
+
 async def _run_analyze(session: AsyncSession, job: ProcessingJobRecord, packet: SubmissionPacket) -> dict[str, Any]:
     await _set_progress(session, job, 15)
     payload = job.input_payload or {}
@@ -821,6 +962,7 @@ async def process_job(session: AsyncSession, job: ProcessingJobRecord) -> Proces
 
     runners = {
         "assessment": _run_assessment,
+        "hls": _run_hls,
         "transcribe": _run_transcribe,
         "translate": _run_translate,
         "analyze": _run_analyze,

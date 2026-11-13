@@ -240,6 +240,157 @@ def extract_keyframes(source: str | Path, output_dir: str | Path, limit: int = 1
     return frames
 
 
+def _even(value: int) -> int:
+    return value if value % 2 == 0 else value + 1
+
+
+def _hls_1080p_target(width: int, height: int) -> tuple[int, int, int]:
+    """Return (width, height, bitrate_kbps) capped at 1080p without upscaling."""
+    source_width = max(int(width or 0), 2)
+    source_height = max(int(height or 0), 2)
+    if source_height > 1080:
+        target_height = 1080
+        target_width = _even(int(round(1080 * source_width / source_height)))
+        bitrate = 5000
+    else:
+        target_height = _even(source_height)
+        target_width = _even(source_width)
+        bitrate = min(5000, max(1000, int((source_width * source_height) / 1_000_000 * 2)))
+    return max(target_width, 2), max(target_height, 2), bitrate
+
+
+def create_hls_1080p(source: str | Path, output_dir: str | Path) -> dict[str, Any]:
+    """Build a HubTweak-style master + 1080p HLS package next to the caller-owned output dir."""
+    source = Path(source)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    probe = probe_media(source)
+    if not probe["hasVideo"]:
+        raise MediaProcessError("Source has no video stream for HLS conversion")
+    width, height, bitrate = _hls_1080p_target(probe["width"], probe["height"])
+    quality_dir = output_dir / "1080p"
+    quality_dir.mkdir(parents=True, exist_ok=True)
+    quality_playlist = quality_dir / "playlist.m3u8"
+    segment_pattern = quality_dir / "segment_%03d.ts"
+    master_playlist = output_dir / "playlist.m3u8"
+    video_filter = f"scale={width}:{height}:flags=bicubic,setsar=1,format=yuv420p"
+    attempts: list[list[str]] = []
+    common_tail = [
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "high",
+        "-level",
+        "4.1",
+        "-pix_fmt",
+        "yuv420p",
+        "-b:v",
+        f"{bitrate}k",
+        "-preset",
+        "veryfast",
+        "-threads",
+        "2",
+        "-vf",
+        video_filter,
+        "-f",
+        "hls",
+        "-hls_time",
+        "10",
+        "-hls_playlist_type",
+        "vod",
+        "-hls_flags",
+        "independent_segments",
+        "-hls_list_size",
+        "0",
+        "-hls_segment_filename",
+        str(segment_pattern),
+        str(quality_playlist),
+    ]
+    if probe["hasAudio"]:
+        attempts.append(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-fflags",
+                "+genpts",
+                "-i",
+                str(source),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                *common_tail,
+            ]
+        )
+    attempts.append(
+        [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-fflags",
+            "+genpts",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-an",
+            *common_tail,
+        ]
+    )
+    last_error = ""
+    for args in attempts:
+        for partial in quality_dir.glob("segment_*.ts"):
+            partial.unlink(missing_ok=True)
+        if quality_playlist.exists():
+            quality_playlist.unlink(missing_ok=True)
+        try:
+            run_command(args, timeout=600)
+        except MediaProcessError as error:
+            last_error = str(error)
+            continue
+        if quality_playlist.exists() and quality_playlist.stat().st_size > 0:
+            break
+    else:
+        raise MediaProcessError(last_error or "HLS 1080p conversion failed")
+    segments = sorted(quality_dir.glob("segment_*.ts"))
+    if not segments:
+        raise MediaProcessError("HLS conversion produced no segments")
+    master_playlist.write_text(
+        (
+            "#EXTM3U\n"
+            "#EXT-X-VERSION:3\n"
+            f"#EXT-X-STREAM-INF:BANDWIDTH={bitrate * 1000},RESOLUTION={width}x{height}\n"
+            "1080p/playlist.m3u8\n"
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "kind": "hls_playlist",
+        "path": str(master_playlist),
+        "contentType": "application/vnd.apple.mpegurl",
+        "profile": "1080p",
+        "width": width,
+        "height": height,
+        "bitrateKbps": bitrate,
+        "segmentCount": len(segments),
+        "duration": probe["duration"],
+        "outputDir": str(output_dir),
+    }
+
+
 def process_upload_file(source: str | Path, work_dir: str | Path | None = None, cover_seed: str | None = None) -> dict[str, Any]:
     """Build the AS-10 derivative set for a verified original."""
     source = Path(source)

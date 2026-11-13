@@ -174,7 +174,7 @@
 .portal-profile-control strong,.portal-profile-control small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .portal-profile-control strong{font-size:12px}
 .portal-profile-control small{font-size:10px;color:var(--muted)}
-.portal-chat-profile>.quiet{padding:4px 8px}
+.portal-chat-profile>.quiet{padding:4px 8px}.portal-chat-profile .portal-guide-replay{color:var(--sun)}
 .portal-chat-profile>small{padding:0 8px;font-size:10px}
 .portal-chat-stage{height:100dvh;min-width:0;display:flex;flex-direction:column;position:relative;overflow:hidden;background:radial-gradient(900px 420px at 100% 0%,color-mix(in srgb,var(--tint) 55%,transparent),transparent 60%),var(--paper)}
 .portal-chat-header{box-sizing:border-box;height:var(--portal-chat-header-height);min-height:var(--portal-chat-header-height);flex:0 0 var(--portal-chat-header-height);display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 24px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--surface) 94%,transparent);backdrop-filter:blur(10px)}

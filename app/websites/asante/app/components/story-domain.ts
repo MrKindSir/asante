@@ -94,12 +94,24 @@ export function supportingDocumentError(file: Pick<File, "size" | "type">): stri
 export class AsanteApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
+export function asanteCsrfToken(): string {
+  if (typeof document === "undefined") return "";
+  const match = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("asante_csrf="));
+  return match ? decodeURIComponent(match.slice("asante_csrf=".length)) : "";
+}
+export function mutationHeaders(contentType = true): Record<string, string> {
+  const headers: Record<string, string> = { "X-Asante-Request": "1" };
+  if (contentType) headers["Content-Type"] = "application/json";
+  const token = asanteCsrfToken();
+  if (token) headers["X-Asante-CSRF"] = token;
+  return headers;
+}
 export async function api<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(
     "/asante/api" + path,
     body === undefined
       ? { cache: "no-store", credentials: "include" }
-      : { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", "X-Asante-Request": "1" }, body: JSON.stringify(body) },
+      : { method: "POST", credentials: "include", headers: mutationHeaders(), body: JSON.stringify(body) },
   );
   if (!response.ok) {
     let detail: unknown;

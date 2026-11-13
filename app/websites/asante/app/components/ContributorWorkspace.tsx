@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { api, AsanteApiError, mediaError, supportingDocumentError } from "./story-domain";
+import { api, AsanteApiError, mediaError, mutationHeaders, supportingDocumentError } from "./story-domain";
 
 import { captureAsanteStorage, openWorkspace, savePreference, uploadFile, Profile, Project, Media, Workspace, migrateBrowserStorage, Account, SaveProjectOptions } from "./workspace-client";
 
@@ -12,6 +12,10 @@ import AccountAccess from "./AccountAccess";
 import { Story } from "./story-domain";
 import ContributorChat from "./ContributorChat";
 import { portalChatHref, readPortalChatSelection } from "./portal-chat-domain";
+import { portalGuideKey, portalGuideSteps, readPortalGuide } from "./portal-guide-domain";
+import { portalResearchGuideKey, portalResearchGuideSteps, readPortalResearchGuide } from "./portal-research-guide-domain";
+import { portalMediaGuideKey, portalMediaGuideSteps, readPortalMediaGuide } from "./portal-media-guide-domain";
+import { portalSubmitGuideKey, portalSubmitGuideSteps, readPortalSubmitGuide } from "./portal-submit-guide-domain";
 import { FieldReportDocument } from "./plan-document";
 
 export default function ContributorWorkspace() {
@@ -41,6 +45,10 @@ export default function ContributorWorkspace() {
   const [liveLocation, setLiveLocation] = useState(false);
   const [ready, setReady] = useState(false);
   const [legacyCount, setLegacyCount] = useState(0);
+  const [portalGuideStep, setPortalGuideStep] = useState<number | null>(null);
+  const [portalResearchGuideStep, setPortalResearchGuideStep] = useState<number | null>(null);
+  const [portalMediaGuideStep, setPortalMediaGuideStep] = useState<number | null>(null);
+  const [portalSubmitGuideStep, setPortalSubmitGuideStep] = useState<number | null>(null);
 
   const [dirty, setDirty] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
@@ -66,6 +74,10 @@ export default function ContributorWorkspace() {
     if (saved.profile) setProfileDraft(saved.profile);
     setProjects(saved.projects);
     setLiveLocation(saved.preferences?.[liveLocationKey] === "true");
+    setPortalGuideStep(readPortalGuide(saved.preferences?.[portalGuideKey]));
+    setPortalResearchGuideStep(readPortalResearchGuide(saved.preferences?.[portalResearchGuideKey]));
+    setPortalMediaGuideStep(readPortalMediaGuide(saved.preferences?.[portalMediaGuideKey]));
+    setPortalSubmitGuideStep(readPortalSubmitGuide(saved.preferences?.[portalSubmitGuideKey]));
   }
   useEffect(() => {
     let active = true;
@@ -85,6 +97,42 @@ export default function ContributorWorkspace() {
       setLiveLocation(!enabled);
       setMessage((cause as Error).message);
     }
+  }
+  function movePortalGuide(next: number) {
+    const step = next >= portalGuideSteps.length ? null : Math.max(0, next);
+    setPortalGuideStep(step);
+    void savePreference(portalGuideKey, JSON.stringify({ version: 1, step: step ?? portalGuideSteps.length })).catch(() => undefined);
+  }
+  function replayPortalGuide() {
+    setPortalGuideStep(0);
+    void savePreference(portalGuideKey, JSON.stringify({ version: 1, step: 0 })).catch(() => undefined);
+  }
+  function movePortalResearchGuide(next: number) {
+    const step = next >= portalResearchGuideSteps.length ? null : Math.max(0, next);
+    setPortalResearchGuideStep(step);
+    void savePreference(portalResearchGuideKey, JSON.stringify({ version: 1, step: step ?? portalResearchGuideSteps.length })).catch(() => undefined);
+  }
+  function replayPortalResearchGuide() {
+    setPortalResearchGuideStep(0);
+    void savePreference(portalResearchGuideKey, JSON.stringify({ version: 1, step: 0 })).catch(() => undefined);
+  }
+  function movePortalMediaGuide(next: number) {
+    const step = next >= portalMediaGuideSteps.length ? null : Math.max(0, next);
+    setPortalMediaGuideStep(step);
+    void savePreference(portalMediaGuideKey, JSON.stringify({ version: 1, step: step ?? portalMediaGuideSteps.length })).catch(() => undefined);
+  }
+  function replayPortalMediaGuide() {
+    setPortalMediaGuideStep(0);
+    void savePreference(portalMediaGuideKey, JSON.stringify({ version: 1, step: 0 })).catch(() => undefined);
+  }
+  function movePortalSubmitGuide(next: number) {
+    const step = next >= portalSubmitGuideSteps.length ? null : Math.max(0, next);
+    setPortalSubmitGuideStep(step);
+    void savePreference(portalSubmitGuideKey, JSON.stringify({ version: 1, step: step ?? portalSubmitGuideSteps.length })).catch(() => undefined);
+  }
+  function replayPortalSubmitGuide() {
+    setPortalSubmitGuideStep(0);
+    void savePreference(portalSubmitGuideKey, JSON.stringify({ version: 1, step: 0 })).catch(() => undefined);
   }
   useEffect(() => {
     if (ready && account?.role === "reviewer") window.location.replace("/asante/review/");
@@ -216,7 +264,7 @@ export default function ContributorWorkspace() {
     const savingEpoch = accountEpoch.current;
     const response = await fetch(`/asante/api/v1/workspace/projects/${encodeURIComponent(project.id)}/plan-document`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json", "X-Asante-Request": "1" },
+      headers: mutationHeaders(),
       body: JSON.stringify({ expectedVersion: project.version, document }),
     });
     if (!response.ok) {
@@ -250,7 +298,7 @@ export default function ContributorWorkspace() {
       return false;
     } finally { if (!background && epoch === accountEpoch.current) setBusy(false); }
   }
-  async function runResearch(savedBrief?: Project): Promise<void> {
+  async function runResearch(savedBrief?: Project, requestedWorker?: "planner" | "researcher"): Promise<void> {
     const initial = savedBrief || project;
     if (!initial || initial.submissionId || !initial.researchBrief || researchLock.current) return;
     researchLock.current = true;
@@ -263,7 +311,8 @@ export default function ContributorWorkspace() {
       if (!savedBrief && dirty) saved = await saveProject(initial);
       if (!stillHere()) return;
       // Always carry the returned server version into the next worker call.
-      for (const workerType of ["planner", "researcher"] as const) {
+      const workerTypes = requestedWorker ? [requestedWorker] : (["planner", "researcher"] as const);
+      for (const workerType of workerTypes) {
         const planHash = saved.plan?.researchInputHash;
         if (workerType === "planner" && planHash && planHash === saved.researchFlow?.inputHash) continue;
         if (workerType === "researcher" && saved.researchFlow?.status === "completed") continue;
@@ -444,6 +493,7 @@ export default function ContributorWorkspace() {
     onSavePlanDocument={savePlanDocument}
     onUpdate={update}
     onRunResearch={runResearch}
+    onRunWorker={(workerType, savedBrief) => runResearch(savedBrief, workerType)}
     onUploadFile={prepareFile}
     onCancelUpload={() => uploadController.current?.abort()}
     onSubmit={submit}
@@ -455,5 +505,17 @@ export default function ContributorWorkspace() {
       return saveProfile();
     }}
     onSignOut={() => void signOut()}
+    portalGuideStep={portalGuideStep}
+    onPortalGuideMove={movePortalGuide}
+    onPortalGuideReplay={replayPortalGuide}
+    portalResearchGuideStep={portalResearchGuideStep}
+    onPortalResearchGuideMove={movePortalResearchGuide}
+    onPortalResearchGuideReplay={replayPortalResearchGuide}
+    portalMediaGuideStep={portalMediaGuideStep}
+    onPortalMediaGuideMove={movePortalMediaGuide}
+    onPortalMediaGuideReplay={replayPortalMediaGuide}
+    portalSubmitGuideStep={portalSubmitGuideStep}
+    onPortalSubmitGuideMove={movePortalSubmitGuide}
+    onPortalSubmitGuideReplay={replayPortalSubmitGuide}
   />;
 }

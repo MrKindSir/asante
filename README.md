@@ -4,6 +4,22 @@ Asante uses GPS to connect community stories to landmarked places. Contributors 
 
 The current project plan and implementation status are maintained in [documentation/ai/exec-plans/PLANS.md](documentation/ai/exec-plans/PLANS.md).
 
+## License
+
+Asante was developed for a competition and is available under the custom
+[Asante Educational Use License](LICENSE). Use, modification, and sharing are
+permitted solely for noncommercial learning, teaching, educational research,
+learning experiments, and evaluation or demonstration of this competition entry.
+Commercial use requires separate written permission from the relevant copyright
+holders. This is source-available software with use restrictions, not an
+unrestricted open-source license.
+
+These terms remain applicable to this version unless separate permission is
+granted. Future releases may use updated terms; there is no automatic change to
+commercial-use permission. Third-party software and contributor content retain
+their own licenses and consent requirements. See [LICENSE](LICENSE) for the full
+terms.
+
 ## Project structure
 
 - `app/websites/asante/` user-facing map, story discovery, contributor portal, planning, and uploads

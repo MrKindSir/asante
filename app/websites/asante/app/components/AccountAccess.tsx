@@ -38,7 +38,7 @@ export default function AccountAccess({ onReady, deviceName }: { onReady: (works
           <p>Contributors open the story portal. Reviewers open the review desk. Your role decides which workspace appears after sign-in.</p>
           <a href="/asante/">← Back to the map</a>
         </section>
-        <form className="surface profile-form" onSubmit={(event) => void submit(event)}>
+        <form className="surface profile-form" data-guide="portal-sign-in" onSubmit={(event) => void submit(event)}>
           <p className="eyebrow">{registering ? "Start your story" : "Welcome back"}</p>
           <h2>{registering ? "Create an Asante account" : "Sign in to Asante"}</h2>
           {registering && <label>Attribution name<input required minLength={2} maxLength={120} value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" /></label>}

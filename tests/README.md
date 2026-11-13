@@ -96,11 +96,54 @@ Manual nonvisual handoff: save a draft, reload, upload original audio/video, rel
 
 After applying migration 0004 and refreshing the app services, run `python scripts/asante/accounts.py` in the host `asante-codex` environment. Test passwords live only in ignored `.env.asante-test-accounts` (0600), with keys `ASANTE_TEST_<DEMO|NOMSA|THABO|AMINA|REVIEWER>_PASSWORD`. No plaintext password belongs in committed docs or generated test reports. The setup is repeatable and must preserve changed drafts/password hashes/review decisions. Four known catalogue fixtures are linked by stable contributor FK; each contributor has an editable private draft. No review or publication is seeded automatically.
 
-The API suite verifies Argon2 salt/verification, normalized email, forbidden role/owner fields, registration consent and explicit legacy linking, session rotation, logout/replay/expiry, generic wrong-password/unknown-user errors, persisted login throttling, role checks and removal of the key bypass. Real service cases check public profile privacy, story/profile links, private owner isolation, reviewer identity, seed preservation and re-login after a fresh API lifecycle. Website tests include rendered email/password forms; both sites pass TypeScript and production builds.
+The API suite verifies Argon2 salt/verification, normalized email, forbidden role/owner fields, registration consent and explicit legacy linking, session rotation, logout/replay/expiry, session-bound CSRF token enforcement, generic wrong-password/unknown-user errors, persisted login throttling, role checks and removal of the key bypass. Real service cases check public profile privacy, story/profile links, private owner isolation, reviewer identity, seed preservation and re-login after a fresh API lifecycle. Website tests include rendered email/password forms; both sites pass TypeScript and production builds.
 
 The named `http` job now includes `tests.e2e.test_accounts`: all five local accounts sign in through clean URLs, restore their own profile/drafts/published-story links, exercise the correct role boundary and sign out; one contributor cannot overwrite another contributor's draft. These checks create/revoke test sessions and update login counters, but do not change drafts/review decisions. With ASANTE_REQUIRE_SERVICES=1, missing account setup fails rather than skipping. CI provisions its own ignored credentials before running this job.
 
+### Stage A portal guide
+
+Local browser walkthrough only: open `http://localhost/asante/portal/`, sign in as the Nomsa contributor, then follow the guide targets in order: `[data-guide="portal-role-landing"]` → `[data-guide="portal-new-chat"]` → `[data-guide="portal-shape"]` → `[data-guide="portal-research-brief"]` → `[data-guide="portal-save-note"]`. Create/save one draft while walking the shape and research-brief steps; do not upload or submit. `Replay portal guide` restarts the versioned `asante.portalGuide.v1` preference. Stage B begins with research workers and remains a separate browser walkthrough.
+
+### Stage B portal research workers
+
+Local browser walkthrough only: open `http://localhost/asante/portal/`, sign in as Nomsa, select a saved draft with a completed research brief, then choose `Replay research guide`. Follow the targets in order: `[data-guide="portal-run-planner"]` → `[data-guide="portal-watch-activity"]` → `[data-guide="portal-plan-decision"]` → `[data-guide="portal-run-researcher"]` → `[data-guide="portal-field-report"]`. Run the planner, open the recorded activity modal, explicitly accept or reject the plan, run the researcher, then open the field report and candidate sources. The guide persists in `asante.portalResearchGuide.v1`. Use the configured localhost worker backend; fixture/deterministic output must be labelled as fixture. Do not upload or submit.
+
+### Stage C portal media drafts
+
+Local browser walkthrough only: open `http://localhost/asante/portal/`, sign in as Nomsa, select one unsent draft, and choose `Replay media guide`. Follow `[data-guide="portal-upload-open"]` → `[data-guide="portal-upload-consent"]` → `[data-guide="portal-upload-file"]` → `[data-guide="portal-upload-verified"]` → `[data-guide="portal-media-drafts"]`. Give storage/analysis consent, choose one short clip such as `/Users/vavu/Downloads/TestData/productionv2/folktale_45s.mp4`, upload once, wait for server verification, then inspect durable `mediaJobs`, `transcriptDraft` and translation states. The guide persists in `asante.portalMediaGuide.v1`. Keep queued/running/succeeded/unavailable labels honest; never claim draft captions are publishable. Do not submit or review the story. If the upload fails, stop and abandon that draft before retrying so duplicate media is not created.
+
+### Stage D portal submit
+
+Local browser walkthrough only: use the same unsent, verified-media draft after Stage C and choose `Replay submit guide`. Follow `[data-guide="portal-submit-open"]` → `[data-guide="portal-submit-preview"]` → `[data-guide="portal-submit-consent"]` → `[data-guide="portal-submit-send"]` → `[data-guide="portal-submission-id"]`. Open Review & submit, inspect the server-built packet preview, confirm explicit human-review consent, send once, and record the returned submission id. Do not open the reviewer workspace in this stage; Stage E uses the captured packet separately.
+
 Browser acceptance: sign in at /asante/portal/ as Nomsa, inspect her linked published story and public profile, edit/save/reload a private draft, upload a supported recording and submit with consent. In another browser session, sign in at /asante/review/ as the reviewer and inspect/play the packet and record a reasoned decision. Sign out and back in as each role to verify persistence. A contributor must not open the reviewer queue; wrong passwords must fail. Test a second contributor and confirm Nomsa's private draft/media is absent. Approval still does not publish automatically.
+
+### Stage E reviewer packet guide
+
+Local built-in-browser walkthrough only: open the submitted packet at `/asante/review/?submission={submission_id}` in a separate reviewer session and choose `Replay reviewer guide`. Follow `[data-guide="review-sign-in"]` → `[data-guide="review-queue-nav"]` → `[data-guide="review-packet"]` → `[data-guide="review-media-drafts"]` → `[data-guide="review-decision"]`. Inspect the frozen narrative, attribution, location, consent, original recording, HLS/media jobs, transcript and translation drafts; play the original recording when available. Stop before choosing approve, request changes, escalate, or reject: the decision remains a human gate.
+
+### Map and listener playback
+
+Local built-in-browser walkthrough only: open `/asante/` (it redirects to `/asante/map/`), confirm the Africa-focused map and catalogue render, select a story card, press Play, open the caption picker, and choose an available transcript/translation track. Confirm the playback surface exposes timed caption text and that the story location remains visible. The Next page-extension setting excludes `*.test.ts` files from route discovery so the public root route is not shadowed by `app/page.test.ts`.
+
+### Real-world contributor submit flow (automated)
+
+Prefer the HTTP e2e that hits the live local proxy (catches API/auth bugs without a disposable fixture API):
+
+```bash
+ASANTE_REQUIRE_SERVICES=1 ASANTE_BASE_URL=http://localhost \
+  python -m unittest tests.e2e.test_contributor_submit_flow -v
+```
+
+It signs in as Nomsa, creates a project, rejects upload without consent, uploads `tests/fixtures/media/sample_video.mp4`, rejects upload replay and cross-contributor upload, previews+submits with a matching `preview_hash`, rejects a forged hash, confirms the contributor cannot open `/review/queue`, confirms the reviewer sees the pending packet (not published), and checks logout revocation.
+
+Optional UI smoke (requires Playwright + Chrome + Node):
+
+```bash
+ASANTE_BASE_URL=http://localhost node tests/e2e/portal_submit_flow.mjs
+```
+
+Evidence lands under `logs/tests/e2e/portal-submit-flow/`. Research-room Playwright remains `tests/e2e/portal_research.mjs` with the disposable fixture API described above.
 
 ## AS-07/12 research browser journey
 

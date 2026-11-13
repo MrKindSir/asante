@@ -1,7 +1,12 @@
 "use client";
 
 import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
-import { languageNames, ResearchPacket, Story } from "./story-domain";
+import { languageNames, mutationHeaders, ResearchPacket, Story } from "./story-domain";
+import { FeatureGuide } from "./GuidedTour";
+import { portalGuideSteps } from "./portal-guide-domain";
+import { portalResearchGuideSteps } from "./portal-research-guide-domain";
+import { portalMediaGuideSteps } from "./portal-media-guide-domain";
+import { portalSubmitGuideSteps } from "./portal-submit-guide-domain";
 import { Account, Media, Profile, Project, ResearchBrief, SaveProjectOptions } from "./workspace-client";
 import { illustrativePublishedHistory } from "./portal-chat-domain";
 import FieldReport from "./FieldReport";
@@ -55,11 +60,24 @@ type Props = {
   onSavePlanDocument: (document: FieldReportDocument) => Promise<void>;
   onUpdate: (fields: Partial<Project>) => void;
   onRunResearch: (savedBrief?: Project) => Promise<void>;
+  onRunWorker?: (workerType: Worker, savedBrief?: Project) => Promise<void>;
   onUploadFile: (file: File, consent: boolean, purpose?: "media" | "supporting_document") => Promise<boolean>;
   onCancelUpload: () => void;
   onSubmit: (previewHash?: string, consentGiven?: boolean) => Promise<boolean>;
   onSaveProfile: (consent: boolean) => Promise<boolean>;
   onSignOut: () => void;
+  portalGuideStep?: number | null;
+  onPortalGuideMove?: (step: number) => void;
+  onPortalGuideReplay?: () => void;
+  portalResearchGuideStep?: number | null;
+  onPortalResearchGuideMove?: (step: number) => void;
+  onPortalResearchGuideReplay?: () => void;
+  portalMediaGuideStep?: number | null;
+  onPortalMediaGuideMove?: (step: number) => void;
+  onPortalMediaGuideReplay?: () => void;
+  portalSubmitGuideStep?: number | null;
+  onPortalSubmitGuideMove?: (step: number) => void;
+  onPortalSubmitGuideReplay?: () => void;
 };
 
 function blankProject(): Project {
@@ -70,11 +88,11 @@ function blankProject(): Project {
   };
 }
 
-function PopupFrame({ title, onClose, children, message, wide = false }: { title: string; onClose: () => void; children: ReactNode; message?: string; wide?: boolean }) {
+function PopupFrame({ title, onClose, children, message, wide = false, guideTarget }: { title: string; onClose: () => void; children: ReactNode; message?: string; wide?: boolean; guideTarget?: string }) {
   return (
     <div className="modal-backdrop portal-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className={`surface portal-popup${wide ? " wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
-        <header className="portal-popup-bar"><div><p className="eyebrow">Asante story chat</p><h2>{title}</h2></div><button type="button" className="plan-results-close" aria-label={`Close ${title}`} onClick={onClose}>×</button></header>
+        <header className="portal-popup-bar" data-guide={guideTarget}><div><p className="eyebrow">Asante story chat</p><h2>{title}</h2></div><button type="button" className="plan-results-close" aria-label={`Close ${title}`} onClick={onClose}>×</button></header>
         {message && <p className="portal-modal-feedback" role="status">{message}</p>}
         {children}
       </section>
@@ -109,7 +127,11 @@ export default function ContributorChat(props: Props) {
     account, profile, profileDraft, onProfileDraftChange, projects, project, publishedStories, publishedId,
     media, busy, message, onDismissMessage, activeWorker, activityOpenRequest = 0, uploadProgress, isUploading, isDirty, legacyCount, storageConsent,
     onStorageConsentChange, liveLocation, onLiveLocationChange, onImportBrowserData, onSelectProject, onSelectPublished,
-    onClearSelection, onSaveProject, onSavePlanDocument, onRunResearch, onUploadFile, onCancelUpload, onSubmit, onSaveProfile, onSignOut,
+    onClearSelection, onSaveProject, onSavePlanDocument, onRunResearch, onRunWorker = (_workerType, savedBrief) => onRunResearch(savedBrief), onUploadFile, onCancelUpload, onSubmit, onSaveProfile, onSignOut,
+    portalGuideStep = null, onPortalGuideMove = () => undefined, onPortalGuideReplay = () => undefined,
+    portalResearchGuideStep = null, onPortalResearchGuideMove = () => undefined, onPortalResearchGuideReplay = () => undefined,
+    portalMediaGuideStep = null, onPortalMediaGuideMove = () => undefined, onPortalMediaGuideReplay = () => undefined,
+    portalSubmitGuideStep = null, onPortalSubmitGuideMove = () => undefined, onPortalSubmitGuideReplay = () => undefined,
   } = props;
   const [popup, setPopup] = useState<Popup>(null);
   const [localActivityOpenRequest, setLocalActivityOpenRequest] = useState(0);
@@ -124,6 +146,7 @@ export default function ContributorChat(props: Props) {
   scope.current = `${account.id}:${project?.id || "new"}`;
   const [planActionBusy, setPlanActionBusy] = useState(false);
   const [uploadConsent, setUploadConsent] = useState(false);
+  const [uploadFileName, setUploadFileName] = useState("");
   const [planDocument, setPlanDocument] = useState<FieldReportDocument | null>(null);
   const [shareUrl, setShareUrl] = useState("");
   const [collaborators, setCollaborators] = useState<Array<{ email: string; role: "viewer" | "editor" }>>([]);
@@ -176,7 +199,7 @@ export default function ContributorChat(props: Props) {
   }
 
   useEffect(() => {
-    setPopup(null); setBriefDraft(null); setShapeDraft(null); setShareUrl(""); setCollaborators([]);
+    setPopup(null); setBriefDraft(null); setShapeDraft(null); setShareUrl(""); setCollaborators([]); setUploadFileName("");
   }, [project?.id]);
 
   function openBrief() {
@@ -257,7 +280,7 @@ export default function ContributorChat(props: Props) {
 
   async function revokeShare() {
     if (!project) return;
-    const response = await fetch(`/asante/api/v1/workspace/projects/${encodeURIComponent(project.id)}/plan-share`, { method: "DELETE", headers: { "X-Asante-Request": "1" } });
+    const response = await fetch(`/asante/api/v1/workspace/projects/${encodeURIComponent(project.id)}/plan-share`, { method: "DELETE", credentials: "include", headers: mutationHeaders(false) });
     if (!response.ok) { setShareMessage("The share link could not be revoked."); return; }
     setShareUrl("");
     setCollaborators([]);
@@ -310,11 +333,14 @@ export default function ContributorChat(props: Props) {
     }
   }
 
+  async function uploadSelectedFile(purpose: "media" | "supporting_document" = "media") {
+    const input = document.querySelector<HTMLInputElement>(`input[name="${purpose === "media" ? "story-media" : "supporting-document"}"]`);
+    const file = input?.files?.[0];
+    if (file && uploadConsent && await onUploadFile(file, uploadConsent, purpose)) { setUploadFileName(""); setPopup(null); }
+  }
   async function submitUpload(event: FormEvent<HTMLFormElement>, purpose: "media" | "supporting_document" = "media") {
     event.preventDefault();
-    const input = event.currentTarget.elements.namedItem(purpose === "media" ? "story-media" : "supporting-document") as HTMLInputElement | null;
-    const file = input?.files?.[0];
-    if (file && uploadConsent && await onUploadFile(file, uploadConsent, purpose)) setPopup(null);
+    await uploadSelectedFile(purpose);
   }
 
   async function submitSupportingDocument() {
@@ -362,7 +388,11 @@ export default function ContributorChat(props: Props) {
           </button>)}
         </div>}
         <footer className="portal-chat-profile">
-          <button type="button" className="portal-profile-control" onClick={() => setPopup("profile")}><span className="avatar">{profile.name.slice(0, 2).toUpperCase()}</span><span><strong>{profile.name}</strong><small>{account.email}</small><small>Profile settings</small></span><span aria-hidden="true">›</span></button>
+          <button type="button" className="portal-profile-control" data-guide="portal-role-landing" onClick={() => setPopup("profile")}><span className="avatar">{profile.name.slice(0, 2).toUpperCase()}</span><span><strong>{profile.name}</strong><small>{account.email}</small><small>Profile settings</small></span><span aria-hidden="true">›</span></button>
+          <button type="button" className="quiet portal-guide-replay" data-guide="portal-replay" onClick={onPortalGuideReplay}>Replay portal guide</button>
+          <button type="button" className="quiet portal-guide-replay" data-guide="portal-research-guide-replay" disabled={!project} onClick={onPortalResearchGuideReplay}>Replay research guide</button>
+          <button type="button" className="quiet portal-guide-replay" data-guide="portal-media-guide-replay" disabled={!project} onClick={onPortalMediaGuideReplay}>Replay media guide</button>
+          <button type="button" className="quiet portal-guide-replay" data-guide="portal-submit-guide-replay" disabled={!project || Boolean(project.submissionId)} onClick={onPortalSubmitGuideReplay}>Replay submit guide</button>
           <button type="button" className="quiet" onClick={() => void flushOpenForm().then(onSignOut).catch(() => undefined)}>Sign out</button>
         </footer>
       </aside>
@@ -371,45 +401,47 @@ export default function ContributorChat(props: Props) {
         {message && <p className="feedback portal-chat-feedback" role="status">{message}<button type="button" aria-label="Dismiss message" onClick={onDismissMessage}>×</button></p>}
         {legacyCount > 0 && <div className="portal-import-banner"><p>{legacyCount} saved Asante browser record{legacyCount === 1 ? "" : "s"} can be backed up and imported into this account.</p><button type="button" className="button secondary" disabled={busy} onClick={onImportBrowserData}>Import browser records</button></div>}
         {project ? <>
-          <header className="portal-chat-header"><div><p className="eyebrow">{project.submissionId ? "Submitted story chat" : "Draft story chat"}</p><h1>{title}</h1><p className="muted">{project.place} · {languageNames[project.language] || project.language} · {project.format}</p></div><div className="portal-chat-header-actions" aria-label="Story actions"><button type="button" className="button primary" disabled={!canEdit || busy || !project.claim.trim()} onClick={() => void onSaveProject(project)}>{busy ? "Saving…" : "Save note"}</button><button type="button" className="button secondary" disabled={!canEdit || busy} onClick={() => setPopup("submit")}>{project.submissionId ? "Submission sent" : "Review & submit"}</button></div></header>
+          <header className="portal-chat-header"><div><p className="eyebrow">{project.submissionId ? "Submitted story chat" : "Draft story chat"}</p><h1>{title}</h1><p className="muted">{project.place} · {languageNames[project.language] || project.language} · {project.format}</p></div><div className="portal-chat-header-actions" aria-label="Story actions"><button type="button" className="button primary" data-guide="portal-save-note" disabled={!canEdit || busy || !project.claim.trim()} onClick={() => void onSaveProject(project)}>{busy ? "Saving…" : "Save note"}</button><button type="button" className="button secondary" data-guide="portal-submit-open" disabled={!canEdit || busy} onClick={() => setPopup("submit")}>{project.submissionId ? "Submission sent" : "Review & submit"}</button></div></header>
           <div className="portal-chat-thread" role="log" aria-live="polite">
             <div className="chat-day">Story chat · {project.status === "draft" || !project.status ? "Draft" : project.status.replaceAll("_", " ")}</div>
             <div className="chat-row you"><span className="chat-avatar you" aria-hidden="true">{profile.name.slice(0, 1).toUpperCase()}</span><article className="chat-bubble user"><p className="chat-label">01 / Shape your story</p><h2>{project.title || "Untitled story"}</h2><p>{project.place} · {languageNames[project.language] || project.language} · {project.format} · for {project.audience || "your listeners"}</p>{project.claim && <><p><strong>Your claim or research question</strong></p><p>{project.claim}</p></>}{project.source && <p><strong>Source to consider:</strong> <a href={project.source} target="_blank" rel="noopener noreferrer">{project.source}</a></p>}{project.transcript && <details><summary>Story notes and original words</summary><p>{project.transcript}</p></details>}<div className="chat-actions"><button type="button" className="button secondary" disabled={!canEdit || busy} onClick={openShape}>Edit story details</button>{!project.submissionId && <button type="button" className="button secondary" disabled={busy} onClick={() => void onSaveProject(project)}>Save story notes</button>}</div></article></div>
 
-            {!project.submissionId && <div className="chat-row asante"><span className="chat-avatar asante" aria-hidden="true">✦</span><article className="chat-bubble asante portal-result-bubble" data-testid="research-step">
+            {!project.submissionId && <div className="chat-row asante"><span className="chat-avatar asante" aria-hidden="true">✦</span><article className="chat-bubble asante portal-result-bubble" data-testid="research-step" data-guide="portal-research-actions">
               <p className="chat-label">02 / Prepare your research brief</p>
               <p>Tell us more about your story so the Asante workers can prepare relevant research and a field report.</p>
               <p className="muted">{!briefComplete ? "Your research brief is incomplete." : project.researchFlow?.status === "completed" ? "Research completed for this saved brief. Candidate evidence requires human interpretation." : project.researchFlow?.status === "failed" ? "Research failed. Your saved brief is preserved." : project.researchFlow?.status === "running" ? "Research is in progress for your saved brief." : "Brief saved. Research has not completed for these answers."}</p>
               {project.researchFlow?.status === "failed" && <p role="alert">{project.researchFlow.safeError || "The worker could not complete research. Retry using the saved brief."}</p>}
               <div className="chat-actions portal-action-stack">
-                <button type="button" className="button primary" disabled={busy || activeWorker !== null} onClick={openBrief}>{briefComplete ? "Edit research brief" : "Complete research brief"}</button>
+                <button type="button" className="button primary" data-guide="portal-research-brief" disabled={busy || activeWorker !== null} onClick={openBrief}>{briefComplete ? "Edit research brief" : "Complete research brief"}</button>
                 <button type="button" className="button secondary" disabled={busy || activeWorker !== null} onClick={openShape}>Edit story details</button>
-                {briefComplete && project.researchFlow?.status !== "completed" && <button type="button" className="button secondary" disabled={busy || activeWorker !== null} onClick={() => void onRunResearch()}>{project.researchFlow?.status === "failed" ? "Retry research" : "Start research"}</button>}
-                {project.researchFlow?.status === "completed" && project.plan && project.research?.sources?.length && project.planDocument ? <><button type="button" className="button primary" onClick={() => setPopup("plan")}>Open field report</button><button type="button" className="button secondary" onClick={() => setPopup("research")}>Open sources</button></> : null}
+                {briefComplete && !project.plan && <button type="button" className="button secondary" data-guide="portal-run-planner" disabled={busy || activeWorker !== null} onClick={() => void onRunWorker("planner")}>{project.researchFlow?.status === "failed" && project.researchFlow.workerType === "planner" ? "Retry planner" : "Run planner"}</button>}
+                {briefComplete && !project.plan && <button type="button" className="button secondary" title="Run planner and researcher sequentially" disabled={busy || activeWorker !== null} onClick={() => void onRunResearch()}>{project.researchFlow?.status === "failed" ? "Retry research" : "Start research"}</button>}
+                {briefComplete && project.plan && !project.research && <button type="button" className="button secondary" data-guide="portal-run-researcher" disabled={busy || activeWorker !== null} onClick={() => void onRunWorker("researcher")}>{project.researchFlow?.status === "failed" && project.researchFlow.workerType === "researcher" ? "Retry researcher" : "Run researcher"}</button>}
+                {project.researchFlow?.status === "completed" && project.plan && project.research?.sources?.length && project.planDocument ? <><button type="button" className="button primary" data-guide="portal-field-report" onClick={() => setPopup("plan")}>Open field report</button><button type="button" className="button secondary" data-guide="portal-research-sources" onClick={() => setPopup("research")}>Open sources</button></> : null}
               </div>
             </article></div>}
 
             <ResearchActivity key={`${account.id}:${project.id}`} project={project} accountId={account.id} openRequest={researchActivityOpenRequest} />
 
-            {activeWorker && <div className="chat-row asante" role="status"><span className="chat-avatar asante" aria-hidden="true">✦</span><article className="chat-bubble working"><span className="worker-busy-dot" aria-hidden="true"/><div><p className="chat-label">Asante {activeWorker === "planner" ? "story planner" : "researcher"} is working</p><p>{activeWorker === "planner" ? "Preparing the story plan…" : "Finding candidate evidence… Sources require human interpretation."}</p><p className="muted">You can watch recorded worker steps while this runs, including after a connection interrupt. This chat will say when research finishes.</p><div className="chat-actions"><button type="button" className="button primary" onClick={() => setLocalActivityOpenRequest((value) => value + 1)}>Watch live research activity</button></div></div></article></div>}
+            {activeWorker && <div className="chat-row asante" role="status"><span className="chat-avatar asante" aria-hidden="true">✦</span><article className="chat-bubble working"><span className="worker-busy-dot" aria-hidden="true"/><div><p className="chat-label">Asante {activeWorker === "planner" ? "story planner" : "researcher"} is working</p><p>{activeWorker === "planner" ? "Preparing the story plan…" : "Finding candidate evidence… Sources require human interpretation."}</p><p className="muted">You can watch recorded worker steps while this runs, including after a connection interrupt. This chat will say when research finishes.</p><div className="chat-actions"><button type="button" className="button primary" data-guide="portal-watch-activity" onClick={() => setLocalActivityOpenRequest((value) => value + 1)}>Watch live research activity</button></div></div></article></div>}
 
             {project.researchFlow?.status === "completed" && <div className="chat-row asante" role="status"><span className="chat-avatar asante" aria-hidden="true">✓</span><article className="chat-bubble asante portal-result-bubble"><p className="chat-label">Research finished</p><p>The Asante workers finished for this saved brief. Review the plan and candidate sources below — they still need your interpretation.</p><div className="chat-actions portal-action-stack">{project.planDocument && <button type="button" className="button primary" onClick={() => setPopup("plan")}>Open field report</button>}{project.research?.sources?.length ? <button type="button" className="button secondary" onClick={() => setPopup("research")}>Review sources</button> : null}</div></article></div>}
 
-            {project.plan && <div className="chat-row asante"><span className="chat-avatar asante" aria-hidden="true">✦</span><article className="chat-bubble asante portal-result-bubble"><p className="chat-label">Story plan · {project.suggestion}{project.plan.aiUsed ? " · AI-assisted" : " · fixture"}</p><p>A planning suggestion is ready. Review it, then accept or reject it. Your original details stay separate.</p><div className="chat-actions portal-action-stack"><button type="button" className="button primary" onClick={() => setPopup("plan")}>View plan</button>{project.suggestion === "pending" && <><button type="button" className="button secondary" disabled={!canEdit || busy || planActionBusy} onClick={() => void decidePlan("accepted")}>Accept plan</button><button type="button" className="button secondary" disabled={!canEdit || busy || planActionBusy} onClick={() => void decidePlan("rejected")}>Reject plan</button></>}</div></article></div>}
+            {project.plan && <div className="chat-row asante"><span className="chat-avatar asante" aria-hidden="true">✦</span><article className="chat-bubble asante portal-result-bubble" data-guide="portal-plan-decision"><p className="chat-label">Story plan · {project.suggestion}{project.plan.aiUsed ? " · AI-assisted" : " · fixture"}</p><p>A planning suggestion is ready. Review it, then accept or reject it. Your original details stay separate.</p><div className="chat-actions portal-action-stack"><button type="button" className="button primary" onClick={() => setPopup("plan")}>View plan</button>{project.suggestion === "pending" && <><button type="button" className="button secondary" disabled={!canEdit || busy || planActionBusy} onClick={() => void decidePlan("accepted")}>Accept plan</button><button type="button" className="button secondary" disabled={!canEdit || busy || planActionBusy} onClick={() => void decidePlan("rejected")}>Reject plan</button></>}</div></article></div>}
 
             {project.research && <div className="chat-row asante"><span className="chat-avatar asante" aria-hidden="true">⌕</span><article className="chat-bubble asante portal-result-bubble"><p className="chat-label">Research results · candidate evidence</p><p>{project.research.summary || `${project.research.sources?.length || 0} candidate sources collected.`}</p><p className="muted">{project.research.sources?.length || 0} source candidates. Open each source and decide what it supports.</p><div className="chat-actions portal-action-stack"><button type="button" className="button primary" onClick={() => setPopup("research")}>Review sources</button></div></article></div>}
 
-            {(media || project.media) && <div className="chat-row you"><span className="chat-avatar you" aria-hidden="true">♪</span><article className="chat-bubble user"><p className="chat-label">Original recording · {project.submissionId ? "included in submitted packet" : "stored and verified"}</p><p>{media?.name || project.media?.name}</p><div className="chat-actions"><button type="button" className="button secondary" onClick={() => setPopup("upload")}>View recording</button></div></article></div>}
+            {(media || project.media) && <div className="chat-row you"><span className="chat-avatar you" aria-hidden="true">♪</span><article className="chat-bubble user" data-guide="portal-upload-verified"><p className="chat-label">Original recording · {project.submissionId ? "included in submitted packet" : "stored and verified"}</p><p>{media?.name || project.media?.name}</p><div className="chat-actions"><button type="button" className="button secondary" onClick={() => setPopup("upload")}>View recording</button></div></article></div>}
 
-            {(project.mediaJobs?.length || transcriptDraft || Object.keys(translationDrafts).length > 0) ? <div className="chat-row asante" role="status"><span className="chat-avatar asante" aria-hidden="true">⌕</span><article className="chat-bubble asante portal-result-bubble"><p className="chat-label">Media processing · transcription & translation</p><p className="muted">Draft jobs run after a verified upload. Live caption work stays within the configured time and cue caps. These outputs are unreviewed drafts; Asante will not publish them automatically.</p>{!!project.mediaJobs?.length && <ul className="source-list">{project.mediaJobs.map((job) => <li key={job.jobId}><strong>{{transcribe: "Transcription", translate: "Translation", analyze: "Scene analysis"}[job.jobType] || job.jobType}</strong> · {job.status.replaceAll("_", " ")}{job.status === "running" ? ` · ${job.progress}%` : ""}{job.safeError ? ` · ${job.safeError}` : ""}</li>)}</ul>}
+            {(project.mediaJobs?.length || transcriptDraft || Object.keys(translationDrafts).length > 0) ? <div className="chat-row asante" role="status"><span className="chat-avatar asante" aria-hidden="true">⌕</span><article className="chat-bubble asante portal-result-bubble" data-guide="portal-media-drafts"><p className="chat-label">Media processing · transcription & translation</p><p className="muted">Draft jobs run after a verified upload. Live caption work stays within the configured time and cue caps. These outputs are unreviewed drafts; Asante will not publish them automatically.</p>{!!project.mediaJobs?.length && <ul className="source-list">{project.mediaJobs.map((job) => <li key={job.jobId}><strong>{{hls: "HLS 1080p", transcribe: "Transcription", translate: "Translation", analyze: "Scene analysis"}[job.jobType] || job.jobType}</strong> · {job.status.replaceAll("_", " ")}{job.status === "running" ? ` · ${job.progress}%` : ""}{job.safeError ? ` · ${job.safeError}` : ""}</li>)}</ul>}
               {transcriptDraft && <section className="portal-media-draft" aria-label="Transcript draft"><p><strong>Transcript draft</strong> <span className="badge">{transcriptDraft.status || "unknown"}{transcriptDraft.backend ? ` · ${transcriptDraft.backend}` : ""}</span>{typeof transcriptDraft.coveredSeconds === "number" ? ` · first ${transcriptDraft.coveredSeconds}s` : ""}</p>{transcriptDraft.text?.trim() ? <blockquote className="portal-media-draft-text">{transcriptDraft.text}</blockquote> : <p className="muted">{transcriptDraft.note || (transcriptDraft.status === "unavailable" ? "Transcription is unavailable for this recording." : "No transcript text is available yet.")}</p>}{!!transcriptDraft.segments?.length && <details className="portal-media-cues"><summary>Timed transcript cues ({transcriptDraft.segments.length})</summary><ol className="portal-media-draft-cues">{transcriptDraft.segments.map((cue, index) => <li key={`${cue.start}-${cue.end}-${index}`}><time>{cue.start.toFixed(1)}–{cue.end.toFixed(1)}s</time> {cue.text}</li>)}</ol></details>}{transcriptDraft.note && transcriptDraft.text?.trim() && <p className="muted">{transcriptDraft.note}</p>}</section>}
               {Object.keys(translationDrafts).length > 0 && <section className="portal-media-translations" aria-label="Translation drafts">{Object.entries(translationDrafts).map(([language, draft]) => <div className="portal-media-translation" key={language}><p><strong>{languageNames[language] || language}</strong> <span className="badge">{draft.status || "unknown"}{draft.backend ? ` · ${draft.backend}` : ""}</span></p>{draft.text?.trim() ? <blockquote className="portal-media-draft-text">{draft.text}</blockquote> : <p className="muted">{draft.note || (draft.status === "unavailable" ? "Translation is unavailable for this recording." : "No translation text is available yet.")}</p>}{draft.note && draft.text?.trim() && <p className="muted">{draft.note}</p>}</div>)}</section>}
             </article></div> : null}
 
-            {project.submissionId && <div className="chat-row asante"><span className="chat-avatar asante" aria-hidden="true">✓</span><article className="chat-bubble asante"><p className="chat-label">Sent for human review</p><p>Packet reference <code>{project.submissionId}</code>. A human reviewer decides what happens next. This chat cannot publish the story.</p></article></div>}
+            {project.submissionId && <div className="chat-row asante"><span className="chat-avatar asante" aria-hidden="true">✓</span><article className="chat-bubble asante" data-guide="portal-submission-id"><p className="chat-label">Sent for human review</p><p>Packet reference <code>{project.submissionId}</code>. A human reviewer decides what happens next. This chat cannot publish the story.</p></article></div>}
           </div>
           <div className="portal-chat-composer">
-            <button type="button" className="button secondary portal-upload-action" disabled={!canEdit || busy} onClick={() => setPopup("upload")}>＋ Upload recording</button>
+            <button type="button" className="button secondary portal-upload-action" data-guide="portal-upload-open" disabled={!canEdit || busy} onClick={() => setPopup("upload")}>＋ Upload recording</button>
             <label className="portal-note-field"><span className="visually-hidden">Story question or notes</span><textarea rows={1} maxLength={5000} disabled={!canEdit || busy} value={project.claim} onChange={(event) => props.onUpdate({ claim: event.target.value })} placeholder="Add a research question or note to your story…" /></label>
           </div>
         </> : selectedStory ? <>
@@ -424,10 +456,10 @@ export default function ContributorChat(props: Props) {
           <div className="portal-chat-composer archive-composer"><p className="muted">Published story archives are read-only. Use the + button to start another story chat.</p></div>
         </> : <div className="portal-chat-empty"><span className="brand-mark">a</span><p className="eyebrow">Contributor story chats</p><h1>What story would you like to tell?</h1><p>Use the + button to shape a story, ask the Asante team for a plan or candidate evidence, and prepare a recording for human review.</p></div>}
 
-        <button type="button" className="chat-fab portal-chat-fab" aria-label="New story chat" title="New chat" onClick={openNewChat}>＋</button>
+        <button type="button" className="chat-fab portal-chat-fab" data-guide="portal-new-chat" aria-label="New story chat" title="New chat" onClick={openNewChat}>＋</button>
       </section>
 
-      {popup === "shape" && shapeDraft && <PopupFrame title={project ? "Edit your story" : "01 / Shape your story"} onClose={() => { if (!shapeSaving) void closeForm(); }} message={message} wide>
+      {popup === "shape" && shapeDraft && <PopupFrame title={project ? "Edit your story" : "01 / Shape your story"} onClose={() => { if (!shapeSaving) void closeForm(); }} message={message} wide guideTarget="portal-shape">
         <form className="portal-popup-content" onSubmit={(event) => void saveShape(event)}>
           {autosaveFeedback(shapeAutosave)}
           <p className="muted">Start with the details you know. You can refine the story later, and your words remain yours.</p>
@@ -473,19 +505,24 @@ export default function ContributorChat(props: Props) {
 
       {popup === "upload" && project && <PopupFrame title="Upload your recording" onClose={() => { if (!isUploading) setPopup(null); }} message={message}><form className="portal-popup-content portal-upload-form" onSubmit={(event) => void submitUpload(event)}>
         {media || project.media ? <div className="portal-media-preview"><strong>{media?.name || project.media?.name}</strong><p>{media ? (media.size / 1024 / 1024).toFixed(2) : ""} {media ? "MB · stored and verified" : "Recording is stored and verified"}</p>{(media || project.media)?.type.startsWith("video/") ? <video src={(media || project.media)?.url} controls preload="metadata" playsInline /> : <audio src={(media || project.media)?.url} controls preload="metadata" />}</div> : <p>Choose an audio or video recording. Asante stores the original and checks its actual format, duration and checksum.</p>}
-        {canEdit && <><label className="file-drop"><span className="file-drop-title">Choose audio or video</span><input name="story-media" type="file" accept="audio/mpeg,audio/wav,audio/ogg,video/mp4,video/webm" disabled={busy} /><small>Audio up to 100 MB · video up to 500 MB · maximum 10 minutes</small></label><div className="supporting-document-upload"><div><strong>Supporting PDF (optional)</strong><p className="muted">Attach a document that backs the story. Your Asante research stays private and is not sent to reviewers.</p></div>{project.supportingDocument ? <p className="supporting-document-file"><strong>{project.supportingDocument.name}</strong><small>{(project.supportingDocument.size / 1024 / 1024).toFixed(2)} MB · stored and verified</small></p> : <><input name="supporting-document" type="file" accept="application/pdf,.pdf" disabled={busy} /><button type="button" className="button secondary" disabled={busy || !uploadConsent} onClick={() => void submitSupportingDocument()}>Upload supporting PDF</button></>}</div><label className="check"><input type="checkbox" checked={uploadConsent} onChange={(event) => setUploadConsent(event.target.checked)} /> I consent to storing this original recording and optional supporting PDF for Asante review.</label></>}
+        {canEdit && <><label className="file-drop" data-guide="portal-upload-file"><span className="file-drop-title">Choose audio or video</span><input name="story-media" type="file" accept="audio/mpeg,audio/wav,audio/ogg,video/mp4,video/webm" disabled={busy} onChange={(event) => setUploadFileName(event.currentTarget.files?.[0]?.name || "")} /><small>Audio up to 100 MB · video up to 500 MB · maximum 10 minutes</small>{uploadFileName && <small className="muted">Selected: {uploadFileName}</small>}</label><div className="supporting-document-upload"><div><strong>Supporting PDF (optional)</strong><p className="muted">Attach a document that backs the story. Your Asante research stays private and is not sent to reviewers.</p></div>{project.supportingDocument ? <p className="supporting-document-file"><strong>{project.supportingDocument.name}</strong><small>{(project.supportingDocument.size / 1024 / 1024).toFixed(2)} MB · stored and verified</small></p> : <><input name="supporting-document" type="file" accept="application/pdf,.pdf" disabled={busy} /><button type="button" className="button secondary" disabled={busy || !uploadConsent} onClick={() => void submitSupportingDocument()}>Upload supporting PDF</button></>}</div><label className="check" data-guide="portal-upload-consent"><input type="checkbox" checked={uploadConsent} onChange={(event) => setUploadConsent(event.target.checked)} /> I consent to storing this original recording and optional supporting PDF for Asante review.</label></>}
         {!media && !project.media && <p className="muted">Your recording is not uploaded yet.</p>}
         {uploadProgress !== null && <p role="status">{uploadProgress < 100 ? `Uploading ${uploadProgress}%` : "Verifying recording…"}<button type="button" className="quiet" onClick={onCancelUpload}>Cancel upload</button></p>}
         <p className="prototype-note">Consent to store and analyse the media format is requested before upload. Your original is preserved.</p>
         {canEdit && <div className="action-row portal-popup-actions"><button type="submit" className="button primary" disabled={busy || !uploadConsent}>{isUploading ? "Uploading…" : media || project.media ? "Replace recording" : "Upload recording"}</button><button type="button" className="button secondary" disabled={isUploading} onClick={() => setPopup(null)}>Close</button></div>}
       </form></PopupFrame>}
 
-      {popup === "submit" && project && <PopupFrame title="Review and submit" onClose={() => setPopup(null)} message={message} wide><div className="portal-popup-content"><p>Check this saved revision before sending it to the human review team. Submission does not publish the story.</p><p role="status" className="muted">{submissionPreviewMessage}</p>{isDirty && <button type="button" className="button secondary" disabled={busy} onClick={() => void saveForSubmissionPreview()}>Save edits and load packet preview</button>}{submissionPreview && <section className="submission-snapshot"><p className="eyebrow">Server snapshot · revision {submissionPreview.packet.revision_version}</p><h3>{submissionPreview.packet.title}</h3><p>By {submissionPreview.packet.contributor_name} · {submissionPreview.packet.media_name}</p><p>Consent scope: {submissionPreview.packet.consent_scope}</p><h4>Original narrative</h4><p>{submissionPreview.packet.summary || "No narrative supplied."}</p><h4>Claim and source</h4><p>{submissionPreview.packet.claim || "No specific claim supplied."}</p>{submissionPreview.packet.source_url && <p>{submissionPreview.packet.source_url}</p>}{submissionPreview.packet.supporting_document ? <p>Supporting PDF: <strong>{submissionPreview.packet.supporting_document.name}</strong></p> : <p className="muted">No supporting PDF attached.</p>}<p className="muted">Snapshot hash: <code>{submissionPreview.preview_hash}</code></p></section>}
+      {popup === "submit" && project && <PopupFrame title="Review and submit" onClose={() => setPopup(null)} message={message} wide><div className="portal-popup-content"><p>Check this saved revision before sending it to the human review team. Submission does not publish the story.</p><p role="status" className="muted">{submissionPreviewMessage}</p>{isDirty && <button type="button" className="button secondary" disabled={busy} onClick={() => void saveForSubmissionPreview()}>Save edits and load packet preview</button>}{submissionPreview && <section className="submission-snapshot" data-guide="portal-submit-preview"><p className="eyebrow">Server snapshot · revision {submissionPreview.packet.revision_version}</p><h3>{submissionPreview.packet.title}</h3><p>By {submissionPreview.packet.contributor_name} · {submissionPreview.packet.media_name}</p><p>Consent scope: {submissionPreview.packet.consent_scope}</p><h4>Original narrative</h4><p>{submissionPreview.packet.summary || "No narrative supplied."}</p><h4>Claim and source</h4><p>{submissionPreview.packet.claim || "No specific claim supplied."}</p>{submissionPreview.packet.source_url && <p>{submissionPreview.packet.source_url}</p>}{submissionPreview.packet.supporting_document ? <p>Supporting PDF: <strong>{submissionPreview.packet.supporting_document.name}</strong></p> : <p className="muted">No supporting PDF attached.</p>}<p className="muted">Snapshot hash: <code>{submissionPreview.preview_hash}</code></p></section>}
         <dl><dt>Story</dt><dd>{project.title}</dd><dt>Attribution</dt><dd>{profile.name}</dd><dt>Place</dt><dd>{project.place}</dd><dt>Language</dt><dd>{languageNames[project.language] || project.language}</dd><dt>Recording</dt><dd>{media?.name || project.media?.name || "Upload required"}</dd><dt>Plan</dt><dd>{project.plan ? `Suggestion ${project.suggestion}` : "No plan prepared"}</dd><dt>Research</dt><dd>{project.research ? `${project.research.sources?.length || 0} candidate sources` : "No sources collected"}</dd></dl>
-        <label className="check"><input type="checkbox" disabled={busy || Boolean(project.submissionId)} checked={submissionConsent} onChange={(event) => setSubmissionConsent(event.target.checked)}/> I consent to sending this story packet, its location, and attribution to Asante human review.</label>
+        <label className="check" data-guide="portal-submit-consent"><input type="checkbox" disabled={busy || Boolean(project.submissionId)} checked={submissionConsent} onChange={(event) => setSubmissionConsent(event.target.checked)}/> I consent to sending this story packet, its location, and attribution to Asante human review.</label>
         <p className="muted">A reviewer will make the decision. Nothing publishes automatically from this chat.</p>
-        <div className="action-row portal-popup-actions"><button type="button" className="button primary" disabled={busy || !submissionPreview || !media && !project.media || !submissionConsent || project.title.trim().length < 3 || Boolean(project.submissionId)} onClick={() => void submitPacket()}>{busy ? "Sending packet…" : "Send for human review"}</button><button type="button" className="button secondary" onClick={() => setPopup(null)}>Keep editing</button></div>
+        <div className="action-row portal-popup-actions"><button type="button" className="button primary" data-guide="portal-submit-send" disabled={busy || !submissionPreview || !media && !project.media || !submissionConsent || project.title.trim().length < 3 || Boolean(project.submissionId)} onClick={() => void submitPacket()}>{busy ? "Sending packet…" : "Send for human review"}</button><button type="button" className="button secondary" onClick={() => setPopup(null)}>Keep editing</button></div>
       </div></PopupFrame>}
+
+      {portalMediaGuideStep !== null && project && <FeatureGuide steps={portalMediaGuideSteps} step={portalMediaGuideStep} onMove={onPortalMediaGuideMove} eyebrow="Your media guide" canAdvance={portalMediaGuideStep === 1 ? uploadConsent : portalMediaGuideStep === 2 ? Boolean(uploadFileName || media || project.media || project.mediaJobs?.length) : portalMediaGuideStep === 3 ? Boolean(media || project.media) : portalMediaGuideStep === 4 ? Boolean(project.mediaJobs?.length || transcriptDraft || Object.keys(translationDrafts).length > 0) : true} onAction={(current) => { if (current === 0) setPopup("upload"); if (current === 2 && !(media || project.media || project.mediaJobs?.length)) void uploadSelectedFile(); }} />}
+      {portalSubmitGuideStep !== null && project && <FeatureGuide steps={portalSubmitGuideSteps} step={portalSubmitGuideStep} onMove={onPortalSubmitGuideMove} eyebrow="Your submit guide" canAdvance={portalSubmitGuideStep === 1 ? Boolean(submissionPreview) : portalSubmitGuideStep === 2 ? Boolean(submissionPreview && submissionConsent) : portalSubmitGuideStep === 3 ? Boolean(submissionPreview && submissionConsent && !project.submissionId) : portalSubmitGuideStep === 4 ? Boolean(project.submissionId) : true} onAction={(current) => { if (current === 0) setPopup("submit"); if (current === 3) void submitPacket(); }} />}
+      {portalResearchGuideStep !== null && project && <FeatureGuide steps={portalResearchGuideSteps} step={portalResearchGuideStep} onMove={onPortalResearchGuideMove} eyebrow="Your research guide" canAdvance={portalResearchGuideStep !== 2 ? portalResearchGuideStep !== 4 || project.researchFlow?.status === "completed" : project.suggestion !== "pending"} onAction={(current) => { if (current === 0) void onRunWorker("planner"); if (current === 1) setLocalActivityOpenRequest((value) => value + 1); if (current === 3) void onRunWorker("researcher"); if (current === 4 && project.planDocument) setPopup("plan"); }} />}
+      {portalGuideStep !== null && <FeatureGuide steps={portalGuideSteps} step={portalGuideStep} onMove={onPortalGuideMove} eyebrow="Your portal guide" onAction={(current) => { if (current === 1) void openNewChat(); if (current === 2) openBrief(); if (current === 3) void closeForm(); }} />}
     </main>
   );
 }

@@ -220,8 +220,6 @@ async def seed_public_catalogue() -> None:
     landmark_ids = {item["slug"]: item["id"] for item in LANDMARKS}
     try:
         async with sessions.begin() as session:
-            # Keep an existing developer database aligned after the demo map
-            # was narrowed from worldwide back to Africa-wide.
             await session.execute(
                 update(StoryRecord)
                 .where(StoryRecord.slug.in_(STALE_NON_AFRICA_STORY_SLUGS))

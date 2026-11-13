@@ -305,7 +305,7 @@ async def list_published_stories(
         media_file = item.pop("media_file")
         poster_file = item.pop("poster_file", None)
         item["media_url"] = (
-            f"/asante/api/v1/stories/{item['id']}/hls/index.m3u8"
+            f"/asante/api/v1/stories/{item['id']}/hls/{Path(str(media_file)).name}"
             if media_file and str(media_file).endswith(".m3u8")
             else (f"/asante/api/v1/stories/{item['id']}/media" if media_file else None)
         )
@@ -416,7 +416,7 @@ async def list_public_story_page(
         media_file = item.pop("media_file")
         poster_file = item.pop("poster_file", None)
         item["media_url"] = (
-            f"/asante/api/v1/stories/{item['id']}/hls/index.m3u8"
+            f"/asante/api/v1/stories/{item['id']}/hls/{Path(str(media_file)).name}"
             if media_file and str(media_file).endswith(".m3u8")
             else (f"/asante/api/v1/stories/{item['id']}/media" if media_file else None)
         )
@@ -498,12 +498,23 @@ async def published_story_caption_state(session: AsyncSession, story_slug: str) 
 
 
 def published_hls_object_key(media_file: str, name: str) -> str | None:
-    """Resolve a sibling HLS playlist/segment key under the published media prefix."""
+    """Resolve a playlist/segment key under the published media prefix.
+
+    Accepts same-directory assets (legacy flat packages) and one HubTweak-style
+    quality subdirectory such as ``1080p/playlist.m3u8``.
+    """
     if "/" not in media_file or not media_file.endswith(".m3u8"):
         return None
-    if name != Path(name).name or ".." in name or "/" in name or "\\" in name:
+    relative = str(name or "").strip().lstrip("/")
+    if not relative or "\\" in relative or relative.startswith(".") or ".." in Path(relative).parts:
         return None
-    if not (name.endswith(".m3u8") or name.endswith(".ts")):
+    parts = Path(relative).parts
+    if len(parts) > 2:
         return None
-    return f"{media_file.rsplit('/', 1)[0]}/{name}"
+    if len(parts) == 2 and parts[0] not in {"1080p"}:
+        return None
+    leaf = parts[-1]
+    if leaf != Path(leaf).name or not (leaf.endswith(".m3u8") or leaf.endswith(".ts")):
+        return None
+    return f"{media_file.rsplit('/', 1)[0]}/{Path(*parts).as_posix()}"
 

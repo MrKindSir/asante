@@ -1,6 +1,25 @@
 # Asante implementation blueprint
 
-Blueprint revision: 2026-11-09. This is the controlling implementation order and handoff document. Feature specifications describe targets; they are not evidence that those targets already work.
+## Repository licensing decision (2026-11-12)
+
+At the owner's request, added the custom Asante Educational Use License v1.0
+in the root `LICENSE`, with a linked summary in `README.md`. It permits only
+noncommercial learning, teaching, educational research, learning experiments,
+and evaluation/demonstration of this competition entry. Commercial use requires
+separate written permission. This is a restricted source-available license;
+standard noncommercial licenses allow broader uses than the requested
+learning-only scope.
+
+Copies and modifications must retain the license, attribution and restrictions,
+and identify modifications. Original contributors retain their rights;
+third-party dependencies, supplied briefs and contributor stories/media retain
+their separate terms and consent requirements. Existing competition agreements
+are not overridden. There is no automatic commercial-use date: future releases
+may change terms, but those changes do not retroactively alter this version's
+grant. Documentation/license-only change; no application code or runtime changes
+and no application tests required.
+
+Blueprint revision: 2026-11-12. This is the controlling implementation order and handoff document. Feature specifications describe targets; they are not evidence that those targets already work.
 
 ## Product and fixed boundaries
 
@@ -56,6 +75,11 @@ AS-03.a/b checks ran on 2026-11-07: 13 API unit/functional tests and one isolate
 - Draft media jobs (2026-11-11): verified audio/video uploads enqueue capped `transcribe` + `translate` (+ `analyze` for video) with `submission_id` null. Submit promotes matching draft jobs for the same upload instead of re-running Modal work, then adds assessment. Portal projects expose `mediaJobs`, `transcriptDraft` and `translations`. Backfill script: `scripts/asante/backfill_draft_media_jobs.py`.
 - When prompting future AI/job work: keep localhost≠live backends; enforce caps through `caption_limits.py`; never invent transcripts/captions; rebuild `api` + `job-worker` after live AI changes; leave publication human-gated.
 
+### Session mutation security boundary (2026-11-12)
+
+- Added a session-bound CSRF token for cookie-authenticated Asante mutations. Account and anonymous workspace bootstrap responses set a readable `asante_csrf` cookie derived from the opaque HttpOnly session token; subsequent mutations must send the matching `X-Asante-CSRF` header in addition to `X-Asante-Request: 1` and the same-origin check.
+- Updated both Asante websites' mutation helpers, upload XHR, shared-plan editor and reviewer actions to forward the token. Added unit regression coverage for missing, mismatched, valid and origin-less cookie-session requests. Full dependency-backed checks remain to be run in the project containers.
+
 | Work | Status and evidence | Remaining boundary |
 |---|---|---|
 | Codex development workflow | Conda environment, named execution checks, project-scoped Codex MCP inspection tools for PostgreSQL/MinIO, and local Codex execution rules are documented and set up. | Codex MCP remains read-only; these tools and rules do not belong to the Asante application runtime. |
@@ -88,7 +112,7 @@ P = prototype/partial; N = missing. No row is production-complete. Slice identif
 | AS-07 | Contributor profile and story projects | P; account-owned profile/draft revisions, published-story/profile links, explicit Save, persisted Step 2 research brief and chat shell automated_verified; deterministic browser creation/reload verified; archive/provider SSO pending | AS-02 | FRONTEND; BACKEND | Server-owned drafts; reload/cross-device; explicit save/conflict feedback |
 | AS-08 | Consent, authorship and version provenance | P | AS-01/02/07 | BACKEND | Immutable originals, scoped consent, attribution approval, revision trail |
 | AS-09 | MinIO upload and server verification | P; five-minute API-mediated uploads verified; prototype limits are 100 MiB audio and 500 MiB video; direct presigning/staging cleanup deferred | AS-07/08 | BACKEND; FRONTEND | Scoped short-lived URLs; actual asset verified; expired/forged cases fail |
-| AS-10 | Media derivatives and efficient delivery | P; upload-time ffmpeg probe/audio/poster/keyframe derivatives and demo/MinIO streaming verified; broader HLS delivery and listener readiness UI still open | AS-09 | BACKEND; FRONTEND | Probe, poster/audio/HLS as appropriate; playback-ready assets |
+| AS-10 | Media derivatives and efficient delivery | P; upload-time ffmpeg probe/audio/poster/keyframe derivatives verified; published catalogue videos now use HubTweak-style master+1080p HLS from 45s TestData production clips on localhost and live; multi-bitrate ladder / readiness UI still open | AS-09 | BACKEND; FRONTEND | Probe, poster/audio/HLS as appropriate; playback-ready assets |
 | AS-11 | Durable Asante worker runs | P; planner/researcher persist `worker_runs`; Compose job-worker claims durable draft+submission media/assessment jobs; general retry/cancel harness remains partial | AS-01/02 | ASANTE_AI_RUNTIME | Bounded jobs, retries, deduplication, persisted status and trace |
 | AS-12 | Planning, research and evidence workers | P; explicit saved questionnaire → planner → researcher uses returned server versions; persisted working/failure/retry/completion, report/source popups; deterministic browser journey verified | AS-07/08/11 | ASANTE_AI_RUNTIME; FRONTEND | Structured suggestions, source records, uncertainty and contributor decisions |
 | AS-13 | Transcription, translation and video analysis | P; draft verified uploads enqueue capped transcribe/translate(/analyze); live Modal Whisper/Ollama path + live caption caps; publish still human-gated | AS-10/11 | ASANTE_AI_RUNTIME; FRONTEND | Preserved originals; timed text; language evaluations; reviewed derivatives |
@@ -138,6 +162,14 @@ Dependencies describe integration requirements. UI slices may use typed fixtures
 - Implemented in source: desktop discovery panel is wider; every catalogue card renders its stored poster or a visual fallback; video upload posters use an extracted frame and audio uploads receive deterministic decorative cover art. The existing `stories.poster_file` and `media_derivatives` schema are reused; seed media generation fills missing published story poster records and MinIO objects without adding a redundant column.
 - Implemented in source: public poster URLs now resolve through the published-story API boundary. Position auto-play is a separate opt-in; it requests location, watches foreground movement only while enabled, and tries the nearest playable story within 150 m. Browser media policy can block audible auto-play; the selected player then presents the manual Play control and a clear message. Disabling the option stops the watch and position-started playback.
 - Verified locally: rebuilt/recreated `asante` and `api`, ran the idempotent `python -m app.db.seed_media` against the existing local database/MinIO, and confirmed all four published catalogue stories return poster URLs. The poster route returns 200 with `image/svg+xml` for audio cover art and `image/jpeg` for a video frame; the clean map URL returns 200 and the website container TypeScript check passes. No schema migration was needed. Browser interaction and position-triggered playback still need manual acceptance; audible playback remains subject to browser autoplay policy. The existing Alembic history mismatch is untouched.
+
+### AS-10 HubTweak 1080p HLS for published TestData videos (2026-11-12)
+
+- Published catalogue video stories on localhost and live (`asante.terminalcursor.com`) now store HubTweak-style packages in private MinIO: `published/{slug}/original.mp4`, `poster.jpg`, master `hls/playlist.m3u8`, and `hls/1080p/playlist.m3u8` + `segment_%03d.ts`. `stories.media_file` points at the master playlist.
+- Source clips are the **45s** files under `Downloads/TestData/production/` (not 180s localhost clips, not full originals). Mapping lives in `scripts/asante/sync_live_production_media.py` (`VIDEO_MAP`); packaging prefers `asante_api.media_process.create_hls_1080p`.
+- API `GET /v1/stories/{id}/hls/{asset_path}` authorizes nested `1080p/` playlist/segment paths and rewrites same-origin URLs. Verified per slug: master references `…/hls/1080p/playlist.m3u8`, quality playlist rewrites segments, `segment_000.ts` returns 200.
+- Slugs updated: `story-002`, `testdata-idi-amin`, `testdata-ethiopia`, `testdata-africa-civilizations`, `testdata-snake-wedding`, `testdata-folktale`. Audio demo / `story-001` / `story-003` remain progressive audio. Longer 180s catalogue media can replace these later with the same package layout.
+- Unit evidence: `test_published_hls_object_key_allows_nested_1080p_and_rejects_traversal`, `test_create_hls_1080p_builds_master_and_quality_package`. Website Vitest 33/33 passed after the localhost packaging pass.
 
 ### AS-06 video popup and timed caption choices (2026-11-10)
 
@@ -446,6 +478,12 @@ The user explicitly reauthorized a surgical contributor portal chat slice, super
 
 Leave unfinished: transcription/translation/video jobs, field-report/PDF/share/collaboration, Ollama talk gateway, review desk redesign, HLS/captions/dubbing, deployment. Human gates remain for plan decisions, storage consent, and submission; nothing auto-publishes. No secrets are included in project files.
 
+Stage B local browser slice adds a separate versioned portal research guide (`asante.portalResearchGuide.v1`) and exposes planner/researcher worker controls as explicit contributor actions: run planner, inspect recorded activity, accept/reject the plan, run researcher, then open the field report and candidate sources. The existing “Save and start research” path remains available for compatibility; the guide path uses one worker call at a time and never uploads or submits a story.
+
+Stage C local browser slice adds the versioned media guide (`asante.portalMediaGuide.v1`) for one consented draft upload. It targets the upload control, consent, file selection, server-verified original and durable media-draft card; it does not submit or publish. Draft processing remains governed by ASANTE_AI_RUNTIME caps and must show queued/running/succeeded/unavailable states without fabricated transcript or translation text.
+
+Stage D local browser slice adds the versioned submit guide (`asante.portalSubmitGuide.v1`) for the verified Stage C draft. It targets Review & submit, the authoritative packet preview, explicit human-review consent, one send action and the returned submission id. It freezes the submitted revision and stops before opening the reviewer workspace; Stage E inspects this packet separately.
+
 
 ## Video upload, transcription and analysis — automated_verified; local smoke passed (2026-11-09)
 
@@ -520,3 +558,9 @@ The Haile Selassie submission `26798a75509850ed8bbde999f9f5e17a` already has a v
 Evidence comparison and each transcription, translation, and scene-analysis section now open a worker-trail popup. Durable submission jobs record bounded timestamped checkpoints, worker output, retry/failure events, and the allowed input summary; reviewer UI includes provider/status and saved output. Trail details are observable actions and outcomes, not hidden model reasoning. Contributor research, raw PDF text and prompts stay private. Historical jobs without step events show their actual saved lifecycle timestamps and identify the missing step-level history rather than inventing it.
 
 Verification: API named check passed 57 unit/functional and 13 integration tests (`logs/codex/execution-20261111T161713004994Z.json`); dashboard named check passed 4 tests, TypeScript and production build (`logs/codex/execution-20261111T161808410912Z.json`). Rebuilt/recreated the API, job worker, and dashboard. New/retried jobs will retain step checkpoints. Existing completed runs with no stored event trail will show only their actual persisted lifecycle timestamps and outputs.
+
+## Guided reviewer packet inspection and public map route (2026-11-12)
+
+Stage E adds a versioned reviewer walkthrough (`asante.reviewGuide.v1`) covering reviewer sign-in, queue selection, frozen packet inspection, media/transcript/translation draft inspection, and the human decision panel. It does not select or submit a reviewer decision. The localhost reviewer walkthrough completed against submission `submission_7eb79133d50d44078db130ebb9938439`; the original recording played, HLS 1080p, transcription, and translation jobs were succeeded, and the video-analysis unavailable state remained honest.
+
+The public map/listener route is now served at `/asante/` through a redirect to `/asante/map/`. Next page discovery is restricted to `tsx`/`jsx` so `app/page.test.ts` cannot shadow the root page. Built-in-browser verification confirmed the Africa map, catalogue cards, story selection, video playback, and post-play caption choices for English transcript, isiZulu translation, and Sesotho translation. No publication or reviewer decision was made as part of this slice.

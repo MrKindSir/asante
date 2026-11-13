@@ -32,6 +32,7 @@ from .catalogue import (
 )
 from .database import dispose_database_engine, get_session
 from .models import ContributorRecord, AccountRecord
+from .auth import mutation
 from .storage import media_bytes, media_response, media_bucket, storage_client
 
 
@@ -284,29 +285,33 @@ async def story_media(
     return await run_in_threadpool(media_response, media_file, request.headers.get("range"), request.method == "HEAD")
 
 
-@app.api_route("/v1/stories/{story_id}/hls/{name}", methods=["GET", "HEAD"])
+@app.api_route("/v1/stories/{story_id}/hls/{asset_path:path}", methods=["GET", "HEAD"])
 async def story_hls_asset(
     story_id: str,
-    name: str,
+    asset_path: str,
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     playlist_file = await published_story_media_file(session, story_id)
     if not playlist_file:
         raise HTTPException(status_code=404, detail="Approved story media is not available")
-    object_key = published_hls_object_key(playlist_file, name)
+    object_key = published_hls_object_key(playlist_file, asset_path)
     if not object_key:
         raise HTTPException(status_code=404, detail="Approved video stream asset is not available")
-    if name.endswith(".m3u8"):
+    if asset_path.endswith(".m3u8"):
         body = await run_in_threadpool(media_bytes, object_key)
         base = f"/asante/api/v1/stories/{story_id}/hls/"
+        # Nested quality playlists resolve relative segment names against their own folder.
+        playlist_dir = asset_path.rsplit("/", 1)[0] if "/" in asset_path else ""
         lines: list[str] = []
         for line in body.decode("utf-8").splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#"):
-                safe_name = stripped.rsplit("/", 1)[-1]
-                if published_hls_object_key(playlist_file, safe_name):
-                    line = base + safe_name
+                candidate = stripped
+                if playlist_dir and "/" not in candidate and not candidate.startswith("."):
+                    candidate = f"{playlist_dir}/{candidate}"
+                if published_hls_object_key(playlist_file, candidate):
+                    line = base + candidate
             lines.append(line)
         return Response(
             content="\n".join(lines) + "\n",
@@ -379,7 +384,7 @@ async def nearby_stories(
     return {"items": await list_published_stories(session, latitude, longitude, radius_m, limit)}
 
 
-@app.post("/v1/story-projects/plan")
+@app.post("/v1/story-projects/plan", dependencies=[Depends(mutation)])
 def plan_story(request: PlanRequest) -> dict:
     from .ai.workers import run_planner
 

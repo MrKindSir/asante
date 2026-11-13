@@ -9,7 +9,7 @@ try:
     from asante_api.storage import byte_range
     from asante_api.auth import HASHER, verify_password, Credentials, Registration
     from pydantic import ValidationError
-    from asante_api.catalogue import decode_catalogue_cursor, encode_catalogue_cursor, parse_bbox
+    from asante_api.catalogue import decode_catalogue_cursor, encode_catalogue_cursor, parse_bbox, published_hls_object_key
     from asante_api.main import (
         SUPPORTED_FORMATS,
         SUPPORTED_LANGUAGES,
@@ -96,6 +96,24 @@ class ApiDomainTests(unittest.TestCase):
         for value in ("1,2,3", "-181,-10,10,10", "10,20,20,10", "nan,0,1,1"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_bbox(value)
+
+    def test_published_hls_object_key_allows_nested_1080p_and_rejects_traversal(self):
+        master = "derivatives/upload123/hls/playlist.m3u8"
+        self.assertEqual(
+            published_hls_object_key(master, "1080p/playlist.m3u8"),
+            "derivatives/upload123/hls/1080p/playlist.m3u8",
+        )
+        self.assertEqual(
+            published_hls_object_key(master, "1080p/segment_001.ts"),
+            "derivatives/upload123/hls/1080p/segment_001.ts",
+        )
+        self.assertEqual(
+            published_hls_object_key("published/story-002/hls/index.m3u8", "seg_000.ts"),
+            "published/story-002/hls/seg_000.ts",
+        )
+        self.assertIsNone(published_hls_object_key(master, "../playlist.m3u8"))
+        self.assertIsNone(published_hls_object_key(master, "720p/playlist.m3u8"))
+        self.assertIsNone(published_hls_object_key(master, "1080p/nested/playlist.m3u8"))
 
 
 if __name__ == "__main__":
